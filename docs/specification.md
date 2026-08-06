@@ -715,7 +715,19 @@ Recognition and validation profiles may use different providers and models. Pass
 
 Before the first provider request, the OCR crate decodes the PNG and projects foreground pixels onto the vertical axis. Contiguous row clusters near the maximum glyph-row height are counted as likely large main rows; shorter clusters are treated as ruby candidates. When the estimate is reliable, Pass 1 must return exactly that many main lines. A mismatch is rejected and retried, preventing a syntactically valid one-line response from silently dropping a second visible row. The estimate recognizes layout only and never substitutes for character OCR.
 
-For Japanese, normalization records every change and applies language-specific punctuation and character rules. The canonical long-vowel mark is `ー`; punctuation normalization uses Japanese full-width conventions, and ellipsis policy is deterministic. Control characters from model output are treated as validation concerns rather than silently persisted as visible subtitle text.
+For Japanese, normalization records every change and applies language-specific
+punctuation and character rules. The canonical long-vowel mark is `ー`;
+punctuation normalization uses Japanese full-width conventions, and ellipsis
+policy is deterministic. Model-provided control characters are preserved without
+model-specific substitution, while halfwidth-to-fullwidth symbol normalization
+remains active.
+
+OCR language presets are defined inside the OCR crate for English (`eng`), French
+(`fra`), German (`deu`), Italian (`ita`), Japanese (`jpn`), Korean (`kor`), and
+Spanish (`spa`). Each preset owns its prompt guidance and normalization policy.
+The five Latin-script presets share one literal-recognition policy that preserves
+case, diacritics, punctuation, and spacing without language correction; only
+their canonical language identity differs.
 
 ### 8.6 OCR control and checkpointing
 

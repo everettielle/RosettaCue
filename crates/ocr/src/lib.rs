@@ -1,5 +1,5 @@
 mod error;
-mod japanese;
+mod languages;
 mod lmstudio;
 mod prompt;
 mod row_detection;

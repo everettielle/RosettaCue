@@ -13,7 +13,7 @@ use rosettacue_llm::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::japanese::{NormalizationEvent, normalize_japanese};
+use crate::languages::{self, LanguagePreset, NormalizationEvent};
 use crate::prompt::{self, PROMPT_VERSION, SYSTEM_PROMPT};
 use crate::row_detection::estimate_main_rows;
 use crate::{OcrBackend, OcrError, OcrRecognition, OcrRequest};
@@ -174,15 +174,7 @@ impl OcrBackend for ProviderOcrBackend {
     }
 
     fn recognize(&self, request: &OcrRequest) -> Result<OcrRecognition, OcrError> {
-        if !matches!(
-            request.language.to_ascii_lowercase().as_str(),
-            "ja" | "jpn" | "japanese"
-        ) {
-            return Err(OcrError::InvalidConfig(format!(
-                "language profile is not supported yet: {}",
-                request.language
-            )));
-        }
+        let language = languages::resolve(&request.language)?;
         let started = Instant::now();
         let image = std::fs::read(&request.image_path)?;
         let expected_main_rows = estimate_main_rows(&image);
@@ -191,9 +183,9 @@ impl OcrBackend for ProviderOcrBackend {
             &self.recognition_client,
             &image_base64,
             "main-text",
-            &prompt::main_text(&request.language, expected_main_rows),
+            &prompt::main_text(language, expected_main_rows),
             &main_schema(),
-            |content| validate_main(content, expected_main_rows),
+            |content| validate_main(content, expected_main_rows, language),
         )?;
         let main_lines = main
             .lines
@@ -204,20 +196,20 @@ impl OcrBackend for ProviderOcrBackend {
             &self.validation_client,
             &image_base64,
             "annotation",
-            &prompt::annotations(&request.language, &main_lines),
+            &prompt::annotations(language, &main_lines),
             &annotation_schema(),
-            |content| validate_annotations(content, &main_lines),
+            |content| validate_annotations(content, &main_lines, language),
         )?;
         let (style, style_response, _) = Self::run_stage(
             &self.validation_client,
             &image_base64,
             "style",
-            &prompt::whole_cue_style(&request.language, &main_lines),
+            &prompt::whole_cue_style(language, &main_lines),
             &style_schema(),
             validate_whole_cue_style,
         )?;
         let unreadable = main.unreadable || annotations.unreadable;
-        let (lines, normalizations) = assemble_lines(main, annotations, style.italic)?;
+        let (lines, normalizations) = assemble_lines(main, annotations, style.italic, language)?;
         let model = style_response
             .model
             .clone()
@@ -240,7 +232,7 @@ impl OcrBackend for ProviderOcrBackend {
                 prompt_version: PROMPT_VERSION.to_owned(),
                 provider: self.config.recognition.provider.as_str().to_owned(),
                 model,
-                language: request.language.clone(),
+                language: language.code.to_owned(),
                 unreadable,
                 lines,
                 normalizations,
@@ -304,6 +296,7 @@ fn parse_json_content(content: &str) -> Result<Value, OcrError> {
 fn validate_main(
     content: &str,
     expected_main_rows: Option<usize>,
+    language: &LanguagePreset,
 ) -> Result<MainResponse, OcrError> {
     let mut response = serde_json::from_value::<MainResponse>(parse_json_content(content)?)?;
     if response.lines.is_empty() {
@@ -318,7 +311,7 @@ fn validate_main(
         )));
     }
     for line in &mut response.lines {
-        let (normalized, _) = normalize_japanese(&line.text)?;
+        let (normalized, _) = language.normalize(&line.text)?;
         if normalized.is_empty() {
             return Err(OcrError::Validation("main text line is empty".to_owned()));
         }
@@ -330,6 +323,7 @@ fn validate_main(
 fn validate_annotations(
     content: &str,
     main_lines: &[String],
+    language: &LanguagePreset,
 ) -> Result<AnnotationResponse, OcrError> {
     let mut response = serde_json::from_value::<AnnotationResponse>(parse_json_content(content)?)?;
     for annotation in &mut response.annotations {
@@ -342,8 +336,8 @@ fn validate_annotations(
                 "annotation placement is invalid".to_owned(),
             ));
         }
-        annotation.text = normalize_japanese(&annotation.text)?.0;
-        annotation.base = normalize_japanese(&annotation.base)?.0;
+        annotation.text = language.normalize(&annotation.text)?.0;
+        annotation.base = language.normalize(&annotation.base)?.0;
         let line = &main_lines[usize::try_from(annotation.line_index - 1)
             .map_err(|_| OcrError::Validation("line index is too large".to_owned()))?];
         if find_occurrence(line, &annotation.base, annotation.base_occurrence).is_none() {
@@ -364,12 +358,13 @@ fn assemble_lines(
     main: MainResponse,
     annotations: AnnotationResponse,
     italic: bool,
+    language: &LanguagePreset,
 ) -> Result<(Vec<OcrLine>, Vec<NormalizationRecord>), OcrError> {
     let mut records = Vec::new();
     let mut by_line: HashMap<u32, Vec<ValidatedAnnotation>> = HashMap::new();
     for (annotation_index, annotation) in annotations.annotations.into_iter().enumerate() {
-        let (text, text_events) = normalize_japanese(&annotation.text)?;
-        let (base, base_events) = normalize_japanese(&annotation.base)?;
+        let (text, text_events) = language.normalize(&annotation.text)?;
+        let (base, base_events) = language.normalize(&annotation.base)?;
         add_records(
             &mut records,
             text_events,
@@ -403,7 +398,7 @@ fn assemble_lines(
     for (line_offset, raw_line) in main.lines.into_iter().enumerate() {
         let line_index = u32::try_from(line_offset + 1)
             .map_err(|_| OcrError::Validation("too many OCR lines".to_owned()))?;
-        let (text, events) = normalize_japanese(&raw_line.text)?;
+        let (text, events) = language.normalize(&raw_line.text)?;
         add_records(&mut records, events, "text", line_index, None);
         let spans = assemble_spans(
             &text,
@@ -520,23 +515,32 @@ mod tests {
 
     #[test]
     fn validates_and_assembles_ruby() {
-        let main = validate_main(r#"{"lines":[{"text":"司る"}],"unreadable":false}"#, Some(1))
-            .expect("main response");
+        let language = languages::resolve("jpn").expect("Japanese preset");
+        let main = validate_main(
+            r#"{"lines":[{"text":"司る"}],"unreadable":false}"#,
+            Some(1),
+            language,
+        )
+        .expect("main response");
         let annotations = validate_annotations(
             r#"{"annotations":[{"line_index":1,"text":"つかさど","base":"司","base_occurrence":1,"position":"over"}],"unreadable":false}"#,
             &["司る".to_owned()],
+            language,
         )
         .expect("annotation response");
-        let (lines, _) = assemble_lines(main, annotations, false).expect("assemble lines");
+        let (lines, _) =
+            assemble_lines(main, annotations, false, language).expect("assemble lines");
         assert_eq!(lines[0].text, "司る");
         assert!(matches!(lines[0].spans[0], OcrSpan::Ruby { .. }));
     }
 
     #[test]
     fn rejects_a_main_response_that_omits_a_detected_row() {
+        let language = languages::resolve("eng").expect("English preset");
         let error = validate_main(
             r#"{"lines":[{"text":"first"}],"unreadable":false}"#,
             Some(2),
+            language,
         )
         .expect_err("missing row must fail");
         assert!(error.to_string().contains("found 2"));
@@ -544,18 +548,22 @@ mod tests {
 
     #[test]
     fn applies_whole_cue_italic_to_text_and_ruby_spans() {
+        let language = languages::resolve("jpn").expect("Japanese preset");
         let main = validate_main(
             r#"{"lines":[{"text":"Uは 司る人"}],"unreadable":false}"#,
             Some(1),
+            language,
         )
         .expect("main response");
         let annotations = validate_annotations(
             r#"{"annotations":[{"line_index":1,"text":"つかさど","base":"司","base_occurrence":1,"position":"over"}],"unreadable":false}"#,
             &["Uは 司る人".to_owned()],
+            language,
         )
         .expect("annotations");
         let style = validate_whole_cue_style(r#"{"italic":true}"#).expect("whole cue style");
-        let (lines, _) = assemble_lines(main, annotations, style.italic).expect("assembled line");
+        let (lines, _) =
+            assemble_lines(main, annotations, style.italic, language).expect("assembled line");
         assert!(matches!(
             &lines[0].spans[0],
             OcrSpan::Text { styles, .. } if styles == &[TextStyle::Italic]

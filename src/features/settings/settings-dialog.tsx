@@ -82,10 +82,14 @@ const tasks: Array<{ value: ModelTask; label: string }> = [
 ]
 
 const languageItems = [
+  { value: "eng", label: "English (eng)" },
+  { value: "fra", label: "Français (fra)" },
+  { value: "deu", label: "Deutsch (deu)" },
+  { value: "ita", label: "Italiano (ita)" },
+  { value: "zho", label: "中文 (zho)" },
   { value: "jpn", label: "日本語 (jpn)" },
   { value: "kor", label: "한국어 (kor)" },
-  { value: "eng", label: "English (eng)" },
-  { value: "zho", label: "中文 (zho)" },
+  { value: "spa", label: "Español (spa)" },
 ]
 
 const appearanceItems: Array<{
