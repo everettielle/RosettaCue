@@ -597,6 +597,11 @@ export function ProjectWorkspace({
                 ),
                 revision,
               ],
+              revision_counts: {
+                ...current.revision_counts,
+                [recognition.cue_id]:
+                  (current.revision_counts[recognition.cue_id] ?? 0) + 1,
+              },
               project: {
                 ...current.project,
                 statistics: {
@@ -638,6 +643,11 @@ export function ProjectWorkspace({
                     ),
                     revision,
                   ],
+                  revision_counts: {
+                    ...current.revision_counts,
+                    [revision.cue_id]:
+                      (current.revision_counts[revision.cue_id] ?? 0) + 1,
+                  },
                 }
               : current
           )
@@ -772,6 +782,8 @@ export function ProjectWorkspace({
     ? filteredCues.findIndex((cue) => cue.id === selectedCue.id)
     : -1
   const statistics = document?.project.statistics ?? project.statistics
+  const projectSettings =
+    document?.project.metadata.settings ?? project.metadata.settings
 
   const selectAdjacentCue = (offset: number) => {
     const nextCue = filteredCues[selectedIndex + offset]
@@ -847,7 +859,7 @@ export function ProjectWorkspace({
       const result = await desktop.invoke<OcrJobResult>("recognize_ocr", {
         projectPath: project.path,
         cueIds: cueIds ?? null,
-        language: settings.ocr_language,
+        language: projectSettings.ocr_language,
         overwrite: Boolean(cueIds),
         config: {
           recognition: settings.profiles.ocr,
@@ -905,7 +917,7 @@ export function ProjectWorkspace({
         {
           projectPath: project.path,
           cueIds: cueIds ?? null,
-          targetLanguage: settings.target_language,
+          targetLanguage: projectSettings.target_language,
           overwrite: Boolean(cueIds),
           config: settings.profiles.translation,
         }
@@ -923,7 +935,10 @@ export function ProjectWorkspace({
     }
   }
 
-  const reviewSelectedCue = async (moveToNext = false) => {
+  const setSelectedCueReview = async (
+    status: "approved" | "unreviewed",
+    moveToNext = false
+  ) => {
     if (!selectedCue || !selectedDocument) return
     setError(null)
     try {
@@ -932,13 +947,17 @@ export function ProjectWorkspace({
         {
           projectPath: project.path,
           cueId: selectedCue.id,
-          status: "approved",
+          status,
           note: "",
         }
       )
       onProjectChange(result.project)
       await loadDocument()
-      setStatusMessage(m.status_cue_reviewed({ index: selectedCue.cue_index }))
+      setStatusMessage(
+        status === "approved"
+          ? m.status_cue_reviewed({ index: selectedCue.cue_index })
+          : m.status_cue_unreviewed({ index: selectedCue.cue_index })
+      )
       if (moveToNext) selectAdjacentCue(1)
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason))
@@ -1111,10 +1130,10 @@ export function ProjectWorkspace({
         void controlOcr("stop")
         return
       case "approve":
-        void reviewSelectedCue()
+        void setSelectedCueReview("approved")
         return
       case "approve-next":
-        void reviewSelectedCue(true)
+        void setSelectedCueReview("approved", true)
         return
       case "history":
         setRevisionHistoryOpen(true)
@@ -1280,28 +1299,43 @@ export function ProjectWorkspace({
                   </Empty>
                 ) : (
                   <div className="flex flex-col py-1">
-                    {filteredCues.map((cue) => (
-                      <Button
-                        key={cue.id}
-                        variant={cue.id === activeCueId ? "secondary" : "ghost"}
-                        className="h-auto w-full justify-start rounded-none px-3 py-2 text-left"
-                        onClick={() => setActiveCueId(cue.id)}
-                      >
-                        <span className="flex min-w-0 flex-1 flex-col gap-1">
-                          <span className="flex items-center gap-2">
-                            <span className="font-mono text-xs font-medium">
-                              {String(cue.cue_index).padStart(6, "0")}
+                    {filteredCues.map((cue) => {
+                      const active = cue.id === activeCueId
+                      const reviewed = cue.review_status === "approved"
+                      return (
+                        <Button
+                          key={cue.id}
+                          variant={active ? "secondary" : "ghost"}
+                          className={cn(
+                            "h-auto w-full justify-start rounded-none px-3 py-2 text-left",
+                            reviewed &&
+                              (active
+                                ? "bg-success/15 hover:bg-success/20"
+                                : "bg-success/10 hover:bg-success/15")
+                          )}
+                          onClick={() => setActiveCueId(cue.id)}
+                        >
+                          <span
+                            className={cn(
+                              "flex min-w-0 flex-1 flex-col gap-1",
+                              cue.ocr_status !== "succeeded" && "opacity-50"
+                            )}
+                          >
+                            <span className="flex items-center gap-2">
+                              <span className="font-mono text-xs font-medium">
+                                {String(cue.cue_index).padStart(6, "0")}
+                              </span>
+                              <span className="ml-auto text-xs font-normal text-muted-foreground">
+                                {formatTimestamp(cue.start_ms)}
+                              </span>
                             </span>
-                            <span className="ml-auto text-xs font-normal text-muted-foreground">
-                              {formatTimestamp(cue.start_ms)}
+                            <span className="truncate text-xs font-normal text-muted-foreground">
+                              {cueText.get(cue.id) || m.workspace_waiting_ocr()}
                             </span>
                           </span>
-                          <span className="truncate text-xs font-normal text-muted-foreground">
-                            {cueText.get(cue.id) || m.workspace_waiting_ocr()}
-                          </span>
-                        </span>
-                      </Button>
-                    ))}
+                        </Button>
+                      )
+                    })}
                   </div>
                 )}
               </ScrollArea>
@@ -1382,8 +1416,19 @@ export function ProjectWorkspace({
                   onTranslate={() => {
                     if (selectedCue) void translate([selectedCue.id])
                   }}
-                  onApprove={() => void reviewSelectedCue()}
+                  onToggleReview={() =>
+                    void setSelectedCueReview(
+                      selectedCue?.review_status === "approved"
+                        ? "unreviewed"
+                        : "approved"
+                    )
+                  }
                   onOpenHistory={() => setRevisionHistoryOpen(true)}
+                  revisionCount={
+                    selectedCue
+                      ? (document?.revision_counts[selectedCue.id] ?? 0)
+                      : 0
+                  }
                   cuePosition={selectedIndex + 1}
                   cueCount={filteredCues.length}
                   onPrevious={() => selectAdjacentCue(-1)}
@@ -1425,6 +1470,7 @@ export function ProjectWorkspace({
       <SettingsDialog
         open={settingsOpen}
         settings={settings}
+        projectSettings={projectSettings}
         debugLoggingEnabled={debugLoggingEnabled}
         debugLogCount={debugLogCount}
         onOpenChange={setSettingsOpen}
@@ -1434,9 +1480,18 @@ export function ProjectWorkspace({
           setDebugLoggingEnabled(snapshot.enabled)
           setDebugLogCount(snapshot.entries.length)
         }}
-        onSave={(next) => {
+        onSave={async (next, nextProjectSettings) => {
+          const nextProject = await desktop.invoke<ProjectOverview>(
+            "update_project_settings",
+            {
+              projectPath: project.path,
+              settings: nextProjectSettings,
+            }
+          )
           setSettings(next)
           saveWorkspaceSettings(next)
+          onProjectChange(nextProject)
+          await loadDocument()
           setError(null)
           setStatusMessage(m.status_settings_saved())
         }}
@@ -1724,8 +1779,9 @@ function Inspector({
   translationBusy,
   onOcr,
   onTranslate,
-  onApprove,
+  onToggleReview,
   onOpenHistory,
+  revisionCount,
   cuePosition,
   cueCount,
   onPrevious,
@@ -1745,8 +1801,9 @@ function Inspector({
   translationBusy: boolean
   onOcr: () => void
   onTranslate: () => void
-  onApprove: () => void
+  onToggleReview: () => void
   onOpenHistory: () => void
+  revisionCount: number
   cuePosition: number
   cueCount: number
   onPrevious: () => void
@@ -1826,8 +1883,8 @@ function Inspector({
               <Button
                 size="sm"
                 variant="outline"
-                disabled={!document || cue.review_status === "approved"}
-                onClick={onApprove}
+                disabled={!document}
+                onClick={onToggleReview}
               >
                 <CheckCircle2Icon data-icon="inline-start" />
                 {cue.review_status === "approved"
@@ -1881,6 +1938,14 @@ function Inspector({
                         size="icon-xs"
                         onClick={onOpenHistory}
                       />
+                      <Badge
+                        variant="secondary"
+                        aria-label={m.revision_history_count({
+                          count: revisionCount,
+                        })}
+                      >
+                        {revisionCount}
+                      </Badge>
                     </div>
                     <SubtitleContentEditor
                       lines={draft?.lines ?? []}

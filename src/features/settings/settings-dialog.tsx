@@ -7,8 +7,10 @@ import {
   MonitorIcon,
   MonitorCogIcon,
   MoonIcon,
+  PlusIcon,
   RefreshCwIcon,
   SunIcon,
+  Trash2Icon,
 } from "lucide-react"
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
@@ -48,6 +50,7 @@ import type {
   LlmModel,
   LlmProvider,
   MediaToolDiagnostic,
+  ProjectSettings,
   ProviderDiagnostic,
 } from "@/features/projects/types"
 import {
@@ -151,6 +154,7 @@ function mediaToolOriginLabel(origin: MediaToolDiagnostic["origin"]) {
 export function SettingsDialog({
   open,
   settings,
+  projectSettings,
   debugLoggingEnabled,
   debugLogCount,
   onOpenChange,
@@ -160,16 +164,23 @@ export function SettingsDialog({
 }: {
   open: boolean
   settings: WorkspaceSettings
+  projectSettings: ProjectSettings
   debugLoggingEnabled: boolean
   debugLogCount: number
   onOpenChange: (open: boolean) => void
   onOpenDebugLog: () => void
   onDebugLoggingChange: (enabled: boolean) => Promise<void>
-  onSave: (settings: WorkspaceSettings) => void
+  onSave: (
+    settings: WorkspaceSettings,
+    projectSettings: ProjectSettings
+  ) => Promise<void>
 }) {
   const { theme, setTheme } = useTheme()
   const [appearance, setAppearance] = React.useState<Appearance>(theme)
   const [draft, setDraft] = React.useState(() => structuredClone(settings))
+  const [projectDraft, setProjectDraft] = React.useState(() =>
+    structuredClone(projectSettings)
+  )
   const [section, setSection] = React.useState<Section>("general")
   const [activeTask, setActiveTask] = React.useState<ModelTask>("ocr")
   const [models, setModels] = React.useState<
@@ -181,7 +192,20 @@ export function SettingsDialog({
   const [mediaTools, setMediaTools] = React.useState<MediaToolDiagnostic[]>([])
   const [busy, setBusy] = React.useState(false)
   const [diagnosticsBusy, setDiagnosticsBusy] = React.useState(false)
+  const [settingsSaving, setSettingsSaving] = React.useState(false)
   const [error, setError] = React.useState<string | null>(null)
+  const wasOpen = React.useRef(false)
+
+  React.useEffect(() => {
+    if (open && !wasOpen.current) {
+      setDraft(structuredClone(settings))
+      setProjectDraft(structuredClone(projectSettings))
+      setAppearance(theme)
+      setDiagnostic(null)
+      setError(null)
+    }
+    wasOpen.current = open
+  }, [open, projectSettings, settings, theme])
 
   React.useEffect(() => {
     if (!open || section !== "general") {
@@ -220,11 +244,39 @@ export function SettingsDialog({
   const handleOpenChange = (nextOpen: boolean) => {
     if (!nextOpen) {
       setDraft(structuredClone(settings))
+      setProjectDraft(structuredClone(projectSettings))
       setAppearance(theme)
       setDiagnostic(null)
       setError(null)
     }
     onOpenChange(nextOpen)
+  }
+
+  const updateProperNoun = (
+    index: number,
+    field: "source" | "translation",
+    value: string
+  ) => {
+    setProjectDraft((current) => ({
+      ...current,
+      proper_nouns: current.proper_nouns.map((mapping, mappingIndex) =>
+        mappingIndex === index ? { ...mapping, [field]: value } : mapping
+      ),
+    }))
+  }
+
+  const saveSettings = async () => {
+    setSettingsSaving(true)
+    setError(null)
+    try {
+      await onSave(draft, projectDraft)
+      setTheme(appearance)
+      onOpenChange(false)
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason))
+    } finally {
+      setSettingsSaving(false)
+    }
   }
 
   const updateProfile = (patch: Partial<typeof profile>) => {
@@ -436,22 +488,129 @@ export function SettingsDialog({
                 <FieldGroup>
                   <LanguageField
                     label={m.settings_ocr_language()}
-                    value={draft.ocr_language}
+                    value={projectDraft.ocr_language}
                     onChange={(ocr_language) =>
-                      setDraft((current) => ({ ...current, ocr_language }))
+                      setProjectDraft((current) => ({
+                        ...current,
+                        ocr_language,
+                      }))
                     }
                   />
                   <LanguageField
                     label={m.settings_translation_target()}
-                    value={draft.target_language}
+                    value={projectDraft.target_language}
                     onChange={(target_language) =>
-                      setDraft((current) => ({
+                      setProjectDraft((current) => ({
                         ...current,
                         target_language,
                       }))
                     }
                   />
                 </FieldGroup>
+                <Separator />
+                <div className="flex items-start gap-3">
+                  <div className="min-w-0 flex-1">
+                    <h3 className="font-medium">{m.settings_proper_nouns()}</h3>
+                    <p className="text-sm text-muted-foreground">
+                      {m.settings_proper_nouns_description()}
+                    </p>
+                  </div>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() =>
+                      setProjectDraft((current) => ({
+                        ...current,
+                        proper_nouns: [
+                          ...current.proper_nouns,
+                          { source: "", translation: "" },
+                        ],
+                      }))
+                    }
+                  >
+                    <PlusIcon data-icon="inline-start" />
+                    {m.settings_add_proper_noun()}
+                  </Button>
+                </div>
+                {projectDraft.proper_nouns.length === 0 ? (
+                  <p className="text-sm text-muted-foreground">
+                    {m.settings_proper_nouns_empty()}
+                  </p>
+                ) : (
+                  <FieldGroup className="gap-3">
+                    {projectDraft.proper_nouns.map((mapping, index) => (
+                      <Field
+                        key={index}
+                        orientation="horizontal"
+                        className="grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)_auto] items-start gap-2"
+                      >
+                        <Field>
+                          <FieldLabel
+                            className="sr-only"
+                            htmlFor={`proper-noun-source-${index}`}
+                          >
+                            {m.settings_proper_noun_source()}
+                          </FieldLabel>
+                          <Input
+                            id={`proper-noun-source-${index}`}
+                            value={mapping.source}
+                            placeholder={m.settings_proper_noun_source()}
+                            onChange={(event) =>
+                              updateProperNoun(
+                                index,
+                                "source",
+                                event.target.value
+                              )
+                            }
+                          />
+                        </Field>
+                        <span
+                          className="pt-1 text-sm text-muted-foreground"
+                          aria-hidden="true"
+                        >
+                          →
+                        </span>
+                        <Field>
+                          <FieldLabel
+                            className="sr-only"
+                            htmlFor={`proper-noun-translation-${index}`}
+                          >
+                            {m.settings_proper_noun_translation()}
+                          </FieldLabel>
+                          <Input
+                            id={`proper-noun-translation-${index}`}
+                            value={mapping.translation}
+                            placeholder={m.settings_proper_noun_translation()}
+                            onChange={(event) =>
+                              updateProperNoun(
+                                index,
+                                "translation",
+                                event.target.value
+                              )
+                            }
+                          />
+                        </Field>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          aria-label={m.settings_remove_proper_noun()}
+                          onClick={() =>
+                            setProjectDraft((current) => ({
+                              ...current,
+                              proper_nouns: current.proper_nouns.filter(
+                                (_, mappingIndex) => mappingIndex !== index
+                              ),
+                            }))
+                          }
+                        >
+                          <Trash2Icon data-icon="inline-start" />
+                        </Button>
+                      </Field>
+                    ))}
+                  </FieldGroup>
+                )}
               </div>
             )}
 
@@ -707,16 +866,15 @@ export function SettingsDialog({
         </div>
 
         <DialogFooter className="border-t px-6 py-4">
-          <Button variant="outline" onClick={() => handleOpenChange(false)}>
+          <Button
+            variant="outline"
+            disabled={settingsSaving}
+            onClick={() => handleOpenChange(false)}
+          >
             {m.common_cancel()}
           </Button>
-          <Button
-            onClick={() => {
-              setTheme(appearance)
-              onSave(draft)
-              onOpenChange(false)
-            }}
-          >
+          <Button disabled={settingsSaving} onClick={() => void saveSettings()}>
+            {settingsSaving && <Spinner data-icon="inline-start" />}
             {m.settings_save()}
           </Button>
         </DialogFooter>

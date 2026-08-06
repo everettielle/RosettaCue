@@ -10,7 +10,9 @@ export type ProjectOverview = {
     id: string
     name: string
     schema_version: number
+    created_at: string
     updated_at: string
+    settings: ProjectSettings
   }
   statistics: {
     source_count: number
@@ -19,6 +21,17 @@ export type ProjectOverview = {
     ocr_completed_count: number
     reviewed_count: number
   }
+}
+
+export type ProperNounMapping = {
+  source: string
+  translation: string
+}
+
+export type ProjectSettings = {
+  ocr_language: string
+  target_language: string
+  proper_nouns: ProperNounMapping[]
 }
 
 export type BlurayTitleInfo = {
@@ -282,5 +295,6 @@ export type ProjectDocument = {
   cues: SubtitleCue[]
   recognitions: CueRecognition[]
   revisions: CueRevision[]
+  revision_counts: Record<string, number>
   review_decisions: CueReviewDecision[]
 }

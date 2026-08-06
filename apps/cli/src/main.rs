@@ -323,6 +323,7 @@ fn run_command(app: Application, command: Command) -> anyhow::Result<()> {
                 &target_language,
                 overwrite,
                 &config,
+                None,
                 || true,
                 |progress| {
                     eprint!(

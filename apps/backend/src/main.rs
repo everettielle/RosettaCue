@@ -6,7 +6,7 @@ use rosettacue_core::{
     configure_media_tools_directory,
 };
 use rosettacue_diagnostics::{DiagnosticEvent, DiagnosticLevel};
-use rosettacue_domain::{CueEditDocument, ReviewStatus};
+use rosettacue_domain::{CueEditDocument, ProjectSettings, ReviewStatus};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -141,6 +141,13 @@ struct SaveProjectAsParams {
     project_path: String,
     parent: String,
     name: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateProjectSettingsParams {
+    project_path: String,
+    settings: ProjectSettings,
 }
 
 #[derive(Debug, Deserialize)]
@@ -436,6 +443,10 @@ fn dispatch(
             let params: PathParams = parse(value)?;
             serialize_result(app.project_document(params.path))
         }
+        "update_project_settings" => {
+            let params: UpdateProjectSettingsParams = parse(value)?;
+            serialize_result(app.update_project_settings(params.project_path, &params.settings))
+        }
         "export_subtitles" => {
             let params: ExportSubtitlesParams = parse(value)?;
             serialize_result(app.export_subtitles(params.project_path, &params.options))
@@ -575,6 +586,7 @@ fn dispatch(
                 &params.target_language,
                 params.overwrite,
                 &params.config,
+                None,
                 || true,
                 move |progress| emit(&event_sender, "translation-progress", progress),
             ))

@@ -18,6 +18,32 @@ pub struct ProjectMetadata {
     pub updated_at: OffsetDateTime,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<ProjectOrigin>,
+    #[serde(default)]
+    pub settings: ProjectSettings,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct ProjectSettings {
+    pub ocr_language: String,
+    pub target_language: String,
+    #[serde(default)]
+    pub proper_nouns: Vec<ProperNounMapping>,
+}
+
+impl Default for ProjectSettings {
+    fn default() -> Self {
+        Self {
+            ocr_language: "jpn".to_owned(),
+            target_language: "kor".to_owned(),
+            proper_nouns: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct ProperNounMapping {
+    pub source: String,
+    pub translation: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -212,6 +238,7 @@ impl ProjectMetadata {
             created_at: now,
             updated_at: now,
             origin: None,
+            settings: ProjectSettings::default(),
         }
     }
 
@@ -229,6 +256,7 @@ impl ProjectMetadata {
                 path: path.into(),
                 cloned_at: now,
             }),
+            settings: original.settings.clone(),
         }
     }
 }
@@ -585,6 +613,21 @@ mod tests {
             "spans":[{"type":"text","text":"字幕","style":{"slant":"italic"}}]
         }"#;
         assert!(serde_json::from_str::<OcrLine>(old_line).is_err());
+    }
+
+    #[test]
+    fn defaults_project_settings_when_opening_older_metadata() {
+        let mut metadata = serde_json::to_value(ProjectMetadata::new("Movie"))
+            .expect("serialize project metadata");
+        metadata
+            .as_object_mut()
+            .expect("metadata object")
+            .remove("settings");
+
+        let restored: ProjectMetadata =
+            serde_json::from_value(metadata).expect("restore project metadata");
+
+        assert_eq!(restored.settings, ProjectSettings::default());
     }
 }
 

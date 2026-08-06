@@ -51,25 +51,28 @@ The sidecar reads UTF-8 JSON objects separated by newlines from standard input. 
 Request:
 
 ```json
-{"id":"uuid","method":"backend_info","params":{}}
+{ "id": "uuid", "method": "backend_info", "params": {} }
 ```
 
 Successful response:
 
 ```json
-{"id":"uuid","result":{"name":"RosettaCue Core","version":"0.1.0"}}
+{ "id": "uuid", "result": { "name": "RosettaCue Core", "version": "0.1.0" } }
 ```
 
 Failed response:
 
 ```json
-{"id":"uuid","error":{"code":"backend_error","message":"..."}}
+{ "id": "uuid", "error": { "code": "backend_error", "message": "..." } }
 ```
 
 Progress event:
 
 ```json
-{"event":"ocr-progress","payload":{"phase":"running","current":1,"total":100}}
+{
+  "event": "ocr-progress",
+  "payload": { "phase": "running", "current": 1, "total": 100 }
+}
 ```
 
 Request IDs allow Electron to correlate responses even when Rust completes concurrent operations out of order. A single Rust writer thread serializes all responses and events, which prevents interleaved JSON output.
@@ -177,15 +180,15 @@ pnpm dlx shadcn@latest init --preset b27GcrRo --template vite --no-monorepo
 
 Resolved preset contract:
 
-| Setting | Value |
-| --- | --- |
-| Style | `base-rhea` |
-| Primitive base | Base UI |
-| Tailwind | v4 |
-| Theme/base color | neutral |
-| Font | Inter Variable |
-| Icons | Lucide |
-| CSS variables | enabled |
+| Setting          | Value          |
+| ---------------- | -------------- |
+| Style            | `base-rhea`    |
+| Primitive base   | Base UI        |
+| Tailwind         | v4             |
+| Theme/base color | neutral        |
+| Font             | Inter Variable |
+| Icons            | Lucide         |
+| CSS variables    | enabled        |
 
 Application code composes shadcn source components and uses semantic tokens. The global preset theme remains in `src/index.css`. Conditional class names go through `cn()`, and Base UI triggers use `render` rather than `asChild`.
 
@@ -203,7 +206,7 @@ src/
 └── types/desktop.ts               # allowlisted bridge contract
 ```
 
-`ProjectWorkspace` loads `project_document` from Rust and derives the visible cue text from the latest human/translation revision, falling back to the latest OCR recognition. It does not read SQLite directly.
+`ProjectWorkspace` loads `project_document` from Rust and derives the visible cue text from the latest human/translation revision, falling back to the latest OCR recognition. The document also carries per-Cue revision counts and project-owned language/proper-noun settings. Saving the Project settings section calls Rust so those values remain inside the active `.rosettacue` package; only model profiles remain in renderer preferences. The renderer does not read SQLite directly.
 
 ### Renderer localization
 

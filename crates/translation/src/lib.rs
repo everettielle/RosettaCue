@@ -1,17 +1,20 @@
 use std::time::Instant;
 
 use rosettacue_diagnostics::{DiagnosticEvent, DiagnosticLevel};
-use rosettacue_domain::{CueEditDocument, OcrDocument, OcrLine, OcrSpan, TextStyle};
+use rosettacue_domain::{
+    CueEditDocument, OcrDocument, OcrLine, OcrSpan, ProperNounMapping, TextStyle,
+};
 use rosettacue_llm::{CompletionRequest, ProviderClient, ProviderConfig};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-pub const TRANSLATION_PROMPT_VERSION: &str = "subtitle-translation-v1";
+pub const TRANSLATION_PROMPT_VERSION: &str = "subtitle-translation-v2";
 
 const SYSTEM_PROMPT: &str = r"You are a professional audiovisual subtitle translator.
 Translate only the supplied subtitle lines into the requested target language.
 Preserve meaning, tone, speaker intent, punctuation, and deliberate ellipses.
 Use surrounding cues only as context; never include their translations in the output.
+When proper_noun_mappings are supplied, use each mapped translation exactly whenever its source proper noun occurs. Do not translate, inflect, or annotate the mapped form differently.
 Return exactly one output item for every input line, with the same 1-based line_index.
 Do not add commentary, notes, Markdown, speaker labels, or explanations.";
 
@@ -22,6 +25,7 @@ pub struct TranslationRequest<'a> {
     pub target_language: &'a str,
     pub previous_context: Option<&'a str>,
     pub next_context: Option<&'a str>,
+    pub proper_nouns: &'a [ProperNounMapping],
 }
 
 #[derive(Debug, Clone)]
@@ -107,7 +111,8 @@ impl SubtitleTranslator {
                         "model": self.client.config().model,
                         "source_language": request.source_language,
                         "target_language": request.target_language,
-                        "line_count": request.document.subtitle.lines.len()
+                        "line_count": request.document.subtitle.lines.len(),
+                        "proper_noun_count": request.proper_nouns.len()
                     })
                 },
             );
@@ -232,6 +237,7 @@ fn translation_prompt(request: &TranslationRequest<'_>) -> String {
         "target_language": request.target_language,
         "previous_cue_context": request.previous_context,
         "next_cue_context": request.next_context,
+        "proper_noun_mappings": request.proper_nouns,
         "lines": lines
     })
     .to_string()
@@ -440,6 +446,28 @@ mod tests {
                 2,
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn includes_project_proper_noun_mappings_in_the_prompt() {
+        let mappings = vec![ProperNounMapping {
+            source: "綾瀬千早".to_owned(),
+            translation: "Chihaya Ayase".to_owned(),
+        }];
+        let request = TranslationRequest {
+            document: &source(),
+            source_language: "jpn",
+            target_language: "eng",
+            previous_context: None,
+            next_context: None,
+            proper_nouns: &mappings,
+        };
+        let prompt: Value = serde_json::from_str(&translation_prompt(&request)).expect("prompt");
+
+        assert_eq!(
+            prompt["proper_noun_mappings"],
+            json!([{"source":"綾瀬千早","translation":"Chihaya Ayase"}])
         );
     }
 }

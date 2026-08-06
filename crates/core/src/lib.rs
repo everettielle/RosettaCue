@@ -6,8 +6,8 @@ pub use rosettacue_bluray::{MediaToolDiagnostic, MediaToolOrigin};
 use rosettacue_domain::{
     BlurayDiscInfo, CueEditDocument, CueGeometry, CueRecognition, CueReviewDecision, CueRevision,
     JobKind, JobProgress, JobStatus, OcrSpan, OcrStatus, PgsTrackMetadata, ProjectJob,
-    ProjectMetadata, ProjectSource, ProjectStatistics, ReviewStatus, SourceMetadata, SubtitleCue,
-    SubtitleTrack, TrackMetadata,
+    ProjectMetadata, ProjectSettings, ProjectSource, ProjectStatistics, ProperNounMapping,
+    ReviewStatus, SourceMetadata, SubtitleCue, SubtitleTrack, TrackMetadata,
 };
 pub use rosettacue_export::{
     ExportArtifact, ExportFormat, ExportOptions, ExportResult, ExportScope,
@@ -50,6 +50,7 @@ pub struct ProjectDocument {
     pub cues: Vec<SubtitleCue>,
     pub recognitions: Vec<CueRecognition>,
     pub revisions: Vec<CueRevision>,
+    pub revision_counts: HashMap<Uuid, u64>,
     pub review_decisions: Vec<CueReviewDecision>,
 }
 
@@ -123,6 +124,8 @@ struct PersistentTranslationRequest {
     cue_ids: Vec<Uuid>,
     target_language: String,
     overwrite: bool,
+    #[serde(default)]
+    proper_nouns: Vec<ProperNounMapping>,
     config: ProviderConfig,
 }
 
@@ -209,8 +212,26 @@ impl Application {
             cues: store.cues()?,
             recognitions: store.recognitions()?,
             revisions: store.revisions()?,
+            revision_counts: store.revision_counts()?,
             review_decisions: store.review_decisions()?,
         })
+    }
+
+    /// Validates and persists settings owned by one project package.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a language or proper-noun mapping is invalid, or
+    /// when the project metadata cannot be updated.
+    pub fn update_project_settings(
+        self,
+        project_path: impl AsRef<Path>,
+        settings: &ProjectSettings,
+    ) -> Result<ProjectOverview, ProjectSettingsError> {
+        let settings = normalize_project_settings(settings)?;
+        let store = ProjectStore::open(project_path)?;
+        store.update_settings(&settings)?;
+        Ok(Self::project_overview(&store)?)
     }
 
     /// Writes the canonical structured subtitle document and requested
@@ -353,8 +374,8 @@ impl Application {
     ///
     /// # Errors
     ///
-    /// Returns an error for unsupported states, an excessive note, a missing
-    /// revision, or project persistence failure.
+    /// Returns an error for an excessive note, a missing revision, or project
+    /// persistence failure.
     pub fn review_cue(
         self,
         project_path: impl AsRef<Path>,
@@ -362,11 +383,6 @@ impl Application {
         status: ReviewStatus,
         note: &str,
     ) -> Result<ReviewSaveResult, CueEditError> {
-        if !matches!(status, ReviewStatus::NeedsReview | ReviewStatus::Approved) {
-            return Err(CueEditError::Invalid(
-                "a review decision must be needs_review or approved".to_owned(),
-            ));
-        }
         if note.chars().count() > 2_000 {
             return Err(CueEditError::Invalid(
                 "a review note cannot exceed 2,000 characters".to_owned(),
@@ -772,10 +788,13 @@ impl Application {
         target_language: &str,
         overwrite: bool,
         config: &ProviderConfig,
+        proper_nouns: Option<&[ProperNounMapping]>,
         mut should_continue: impl FnMut() -> bool,
         mut progress: impl FnMut(TranslationProgress),
     ) -> Result<TranslationJobResult, TranslationJobError> {
         let store = ProjectStore::open(project_path)?;
+        let project_settings = store.metadata()?.settings;
+        let proper_nouns = proper_nouns.unwrap_or(&project_settings.proper_nouns);
         let cues = store.cues()?;
         let requested = cue_ids.map(|ids| ids.into_iter().collect::<HashSet<_>>());
         if let Some(requested) = &requested
@@ -825,6 +844,7 @@ impl Application {
                 cue_ids: selected.iter().map(|(cue, _)| cue.id).collect(),
                 target_language: target_language.to_owned(),
                 overwrite,
+                proper_nouns: proper_nouns.to_vec(),
                 config: config.redacted(),
             })?,
             &JobProgress {
@@ -896,6 +916,7 @@ impl Application {
                 target_language,
                 previous_context: previous.as_deref(),
                 next_context: next.as_deref(),
+                proper_nouns,
             }) {
                 Ok(output) => {
                     let revision = store.save_translation_revision(cue.id, &output.document)?;
@@ -1076,6 +1097,7 @@ impl Application {
             &request.target_language,
             request.overwrite,
             config,
+            Some(&request.proper_nouns),
             &mut should_continue,
             &mut progress,
         )?;
@@ -1161,6 +1183,59 @@ fn select_ocr_cues(
         selected.retain(|cue| cue.ocr_status != OcrStatus::Succeeded);
     }
     Ok(selected)
+}
+
+fn normalize_project_settings(
+    settings: &ProjectSettings,
+) -> Result<ProjectSettings, ProjectSettingsError> {
+    fn language(value: &str, label: &str) -> Result<String, ProjectSettingsError> {
+        let value = value.trim();
+        if value.is_empty() || value.chars().count() > 32 || value.chars().any(char::is_control) {
+            return Err(ProjectSettingsError::Invalid(format!(
+                "{label} must contain 1 to 32 visible characters"
+            )));
+        }
+        Ok(value.to_owned())
+    }
+
+    if settings.proper_nouns.len() > 500 {
+        return Err(ProjectSettingsError::Invalid(
+            "a project cannot contain more than 500 proper-noun mappings".to_owned(),
+        ));
+    }
+    let mut seen = HashSet::new();
+    let mut proper_nouns = Vec::with_capacity(settings.proper_nouns.len());
+    for mapping in &settings.proper_nouns {
+        let source = mapping.source.trim();
+        let translation = mapping.translation.trim();
+        if source.is_empty()
+            || translation.is_empty()
+            || source.chars().count() > 200
+            || translation.chars().count() > 200
+            || source.chars().any(char::is_control)
+            || translation.chars().any(char::is_control)
+        {
+            return Err(ProjectSettingsError::Invalid(
+                "proper-noun mappings must contain 1 to 200 visible characters on both sides"
+                    .to_owned(),
+            ));
+        }
+        if !seen.insert(source.to_owned()) {
+            return Err(ProjectSettingsError::Invalid(format!(
+                "the proper noun {source:?} is mapped more than once"
+            )));
+        }
+        proper_nouns.push(ProperNounMapping {
+            source: source.to_owned(),
+            translation: translation.to_owned(),
+        });
+    }
+
+    Ok(ProjectSettings {
+        ocr_language: language(&settings.ocr_language, "OCR language")?,
+        target_language: language(&settings.target_language, "translation target language")?,
+        proper_nouns,
+    })
 }
 
 fn validate_cue_edit(document: &CueEditDocument) -> Result<(), CueEditError> {
@@ -1319,6 +1394,14 @@ fn decode_track(
         return Err(PgsExtractionError::NoCues);
     }
     Ok(count)
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ProjectSettingsError {
+    #[error("invalid project settings: {0}")]
+    Invalid(String),
+    #[error(transparent)]
+    Project(#[from] ProjectError),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -1513,6 +1596,40 @@ mod tests {
         assert!(matches!(
             validate_cue_edit(&invalid_color),
             Err(CueEditError::Invalid(message)) if message.contains("invalid text color")
+        ));
+    }
+
+    #[test]
+    fn normalizes_and_validates_project_proper_nouns() {
+        let normalized = normalize_project_settings(&ProjectSettings {
+            ocr_language: " jpn ".to_owned(),
+            target_language: " eng ".to_owned(),
+            proper_nouns: vec![ProperNounMapping {
+                source: " 綾瀬千早 ".to_owned(),
+                translation: " Chihaya Ayase ".to_owned(),
+            }],
+        })
+        .expect("valid settings");
+        assert_eq!(normalized.ocr_language, "jpn");
+        assert_eq!(normalized.target_language, "eng");
+        assert_eq!(normalized.proper_nouns[0].source, "綾瀬千早");
+
+        let duplicate = ProjectSettings {
+            proper_nouns: vec![
+                ProperNounMapping {
+                    source: "千早".to_owned(),
+                    translation: "Chihaya".to_owned(),
+                },
+                ProperNounMapping {
+                    source: "千早".to_owned(),
+                    translation: "Chihaya".to_owned(),
+                },
+            ],
+            ..ProjectSettings::default()
+        };
+        assert!(matches!(
+            normalize_project_settings(&duplicate),
+            Err(ProjectSettingsError::Invalid(message)) if message.contains("mapped more than once")
         ));
     }
 }

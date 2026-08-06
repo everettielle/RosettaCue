@@ -1,15 +1,16 @@
 mod error;
 mod schema;
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use rosettacue_diagnostics::{DiagnosticEvent, DiagnosticLevel};
 use rosettacue_domain::{
     CueEditDocument, CueGeometry, CueRecognition, CueReviewDecision, CueRevision, JobKind,
-    JobProgress, JobStatus, OcrDocument, OcrStatus, ProjectJob, ProjectMetadata, ProjectSource,
-    ProjectStatistics, ReviewStatus, RevisionAuthor, SourceKind, SourceMetadata, SubtitleCue,
-    SubtitleTrack, TrackMetadata,
+    JobProgress, JobStatus, OcrDocument, OcrStatus, ProjectJob, ProjectMetadata, ProjectSettings,
+    ProjectSource, ProjectStatistics, ReviewStatus, RevisionAuthor, SourceKind, SourceMetadata,
+    SubtitleCue, SubtitleTrack, TrackMetadata,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use time::OffsetDateTime;
@@ -181,6 +182,28 @@ impl ProjectStore {
             || serde_json::json!({ "project_id": metadata.id, "name": metadata.name }),
         );
         Ok(())
+    }
+
+    /// Replaces settings stored inside this project package.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when project metadata cannot be read, serialized, or updated.
+    pub fn update_settings(
+        &self,
+        settings: &ProjectSettings,
+    ) -> Result<ProjectMetadata, ProjectError> {
+        let mut metadata = self.metadata()?;
+        metadata.settings = settings.clone();
+        metadata.updated_at = OffsetDateTime::now_utc();
+        self.replace_metadata(&metadata)?;
+        project_event(
+            "update_settings",
+            "committed",
+            "Project settings updated.",
+            || serde_json::json!({ "project_id": metadata.id, "settings": settings }),
+        );
+        Ok(metadata)
     }
 
     /// Returns lightweight counts used by project launchers and workspaces.
@@ -680,6 +703,29 @@ impl ProjectStore {
         rows.map(|row| {
             let row = row?;
             parse_revision_row(&row)
+        })
+        .collect()
+    }
+
+    /// Returns the number of saved revisions for every cue that has history.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when revision counts or cue identifiers are invalid.
+    pub fn revision_counts(&self) -> Result<HashMap<Uuid, u64>, ProjectError> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT cue_id, COUNT(*) FROM cue_revisions GROUP BY cue_id")?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        rows.map(|row| {
+            let (cue_id, count) = row?;
+            Ok((
+                parse_uuid(&cue_id, "revision count cue id")?,
+                u64::try_from(count)
+                    .map_err(|_| ProjectError::InvalidRecord("revision count".to_owned()))?,
+            ))
         })
         .collect()
     }
@@ -1597,6 +1643,31 @@ mod tests {
     }
 
     #[test]
+    fn stores_settings_in_only_the_selected_project() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let first = ProjectStore::create(temporary.path().join("First.rosettacue"), "First")
+            .expect("create first project");
+        let second = ProjectStore::create(temporary.path().join("Second.rosettacue"), "Second")
+            .expect("create second project");
+        let settings = ProjectSettings {
+            ocr_language: "jpn".to_owned(),
+            target_language: "eng".to_owned(),
+            proper_nouns: vec![rosettacue_domain::ProperNounMapping {
+                source: "綾瀬千早".to_owned(),
+                translation: "Chihaya Ayase".to_owned(),
+            }],
+        };
+
+        first.update_settings(&settings).expect("update settings");
+
+        assert_eq!(first.metadata().expect("first metadata").settings, settings);
+        assert_eq!(
+            second.metadata().expect("second metadata").settings,
+            ProjectSettings::default()
+        );
+    }
+
+    #[test]
     fn rejects_every_non_current_schema_version() {
         let temporary = tempfile::tempdir().expect("temporary directory");
         let root = temporary.path().join("Old.rosettacue");
@@ -1763,6 +1834,17 @@ mod tests {
                 .reviewed_count,
             1
         );
+        let unreviewed = created
+            .save_review_decision(cue.id, ReviewStatus::Unreviewed, "review reopened")
+            .expect("reopen review");
+        assert_eq!(unreviewed.status, ReviewStatus::Unreviewed);
+        assert_eq!(
+            created
+                .statistics()
+                .expect("reopened review statistics")
+                .reviewed_count,
+            0
+        );
         assert_eq!(
             created
                 .statistics()
@@ -1789,6 +1871,10 @@ mod tests {
         assert_eq!(history[0].author, RevisionAuthor::Translation);
         assert_eq!(history[1].author, RevisionAuthor::Human);
         assert_eq!(history[2].author, RevisionAuthor::Ocr);
+        assert_eq!(
+            created.revision_counts().expect("revision counts")[&cue.id],
+            3
+        );
         assert_eq!(
             created.revisions().expect("effective translation"),
             std::slice::from_ref(&translation)

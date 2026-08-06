@@ -5,6 +5,7 @@ export const backendMethods = [
   "save_project_as",
   "open_project",
   "project_document",
+  "update_project_settings",
   "export_subtitles",
   "inspect_bluray_source",
   "attach_bluray_source",

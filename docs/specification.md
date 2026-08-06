@@ -298,37 +298,38 @@ Request IDs permit concurrent out-of-order completion. A single Rust writer thre
 
 ### 5.2 Command catalog
 
-| Method                   | Principal parameters                                      | Result                      | Mutation                     |
-| ------------------------ | --------------------------------------------------------- | --------------------------- | ---------------------------- |
-| `backend_info`           | none                                                      | backend name/version/schema | No                           |
-| `media_tool_diagnostics` | none                                                      | tool availability list      | No                           |
-| `create_project`         | parent, name                                              | `ProjectOverview`           | Creates package              |
-| `save_project_as`        | projectPath, parent, name                                 | cloned `ProjectOverview`    | Creates package              |
-| `open_project`           | path                                                      | `ProjectOverview`           | No                           |
-| `project_document`       | path                                                      | complete editor document    | No                           |
-| `export_subtitles`       | projectPath, `ExportOptions`                              | artifacts                   | Writes exports and audit row |
-| `inspect_bluray_source`  | path                                                      | `BlurayDiscInfo`            | No project mutation          |
-| `attach_bluray_source`   | projectPath, sourcePath                                   | source + overview           | Yes                          |
-| `extract_pgs_track`      | projectPath, sourceId, titleIndex, streamIndex            | track + Cue count           | Yes                          |
-| `cue_image`              | projectPath, imagePath                                    | PNG bytes                   | No                           |
-| `save_cue_edit`          | projectPath, cueId, edit document                         | revision                    | Yes                          |
-| `restore_cue_edit`       | projectPath, cueId                                        | human revision from OCR     | Yes                          |
-| `cue_revision_history`   | projectPath, cueId                                        | revisions newest first      | No                           |
-| `restore_cue_revision`   | projectPath, cueId, revisionId                            | appended revision           | Yes                          |
-| `delete_cue_revision`    | projectPath, cueId, revisionId                            | remaining revisions         | Yes                          |
-| `review_cue`             | projectPath, cueId, status, note                          | decision + overview         | Yes                          |
-| `provider_models`        | provider, baseUrl, apiKey                                 | model IDs                   | Provider read                |
-| `diagnose_provider`      | provider, baseUrl, apiKey                                 | reachability/latency/models | Provider read                |
-| `recognize_ocr`          | projectPath, Cue IDs, language, overwrite, pipeline       | job result                  | Yes                          |
-| `translate_cues`         | projectPath, Cue IDs, target language, overwrite, profile | job result                  | Yes                          |
-| `project_jobs`           | projectPath                                               | durable job list            | Recovery normalization       |
-| `cancel_project_job`     | projectPath, jobId                                        | job                         | Yes                          |
-| `configure_diagnostics`  | enabled                                                   | none                        | App preference               |
-| `resume_ocr_job`         | projectPath, jobId, pipeline                              | job result                  | Yes                          |
-| `resume_translation_job` | projectPath, jobId, profile                               | job result                  | Yes                          |
-| `pause_ocr`              | none                                                      | unit                        | In-memory controller         |
-| `resume_ocr`             | none                                                      | unit                        | In-memory controller         |
-| `stop_ocr`               | none                                                      | unit                        | In-memory controller         |
+| Method                    | Principal parameters                                      | Result                      | Mutation                     |
+| ------------------------- | --------------------------------------------------------- | --------------------------- | ---------------------------- |
+| `backend_info`            | none                                                      | backend name/version/schema | No                           |
+| `media_tool_diagnostics`  | none                                                      | tool availability list      | No                           |
+| `create_project`          | parent, name                                              | `ProjectOverview`           | Creates package              |
+| `save_project_as`         | projectPath, parent, name                                 | cloned `ProjectOverview`    | Creates package              |
+| `open_project`            | path                                                      | `ProjectOverview`           | No                           |
+| `project_document`        | path                                                      | complete editor document    | No                           |
+| `update_project_settings` | projectPath, project settings                             | `ProjectOverview`           | Yes                          |
+| `export_subtitles`        | projectPath, `ExportOptions`                              | artifacts                   | Writes exports and audit row |
+| `inspect_bluray_source`   | path                                                      | `BlurayDiscInfo`            | No project mutation          |
+| `attach_bluray_source`    | projectPath, sourcePath                                   | source + overview           | Yes                          |
+| `extract_pgs_track`       | projectPath, sourceId, titleIndex, streamIndex            | track + Cue count           | Yes                          |
+| `cue_image`               | projectPath, imagePath                                    | PNG bytes                   | No                           |
+| `save_cue_edit`           | projectPath, cueId, edit document                         | revision                    | Yes                          |
+| `restore_cue_edit`        | projectPath, cueId                                        | human revision from OCR     | Yes                          |
+| `cue_revision_history`    | projectPath, cueId                                        | revisions newest first      | No                           |
+| `restore_cue_revision`    | projectPath, cueId, revisionId                            | appended revision           | Yes                          |
+| `delete_cue_revision`     | projectPath, cueId, revisionId                            | remaining revisions         | Yes                          |
+| `review_cue`              | projectPath, cueId, status, note                          | decision + overview         | Yes                          |
+| `provider_models`         | provider, baseUrl, apiKey                                 | model IDs                   | Provider read                |
+| `diagnose_provider`       | provider, baseUrl, apiKey                                 | reachability/latency/models | Provider read                |
+| `recognize_ocr`           | projectPath, Cue IDs, language, overwrite, pipeline       | job result                  | Yes                          |
+| `translate_cues`          | projectPath, Cue IDs, target language, overwrite, profile | job result                  | Yes                          |
+| `project_jobs`            | projectPath                                               | durable job list            | Recovery normalization       |
+| `cancel_project_job`      | projectPath, jobId                                        | job                         | Yes                          |
+| `configure_diagnostics`   | enabled                                                   | none                        | App preference               |
+| `resume_ocr_job`          | projectPath, jobId, pipeline                              | job result                  | Yes                          |
+| `resume_translation_job`  | projectPath, jobId, profile                               | job result                  | Yes                          |
+| `pause_ocr`               | none                                                      | unit                        | In-memory controller         |
+| `resume_ocr`              | none                                                      | unit                        | In-memory controller         |
+| `stop_ocr`                | none                                                      | unit                        | In-memory controller         |
 
 ### 5.3 Event catalog
 
@@ -467,7 +468,7 @@ erDiagram
 
 #### `project_metadata`
 
-Exactly one row (`id = 1`) stores `ProjectMetadata` as JSON. Metadata contains schema version, project UUID, name, timestamps, and optional clone origin.
+Exactly one row (`id = 1`) stores `ProjectMetadata` as JSON. Metadata contains schema version, project UUID, name, timestamps, optional clone origin, and project-scoped OCR language, translation target, and proper-noun mappings. The settings field has deterministic defaults when reading a schema-1 package created before the field existed; saving settings writes it only to the active project package.
 
 #### `sources`
 
@@ -512,7 +513,7 @@ Audit records for successfully written artifacts. The subtitle file itself is ex
 
 ### 6.5 Exact schema contract
 
-The current project schema version is **1**. Opening a package requires `PRAGMA user_version = 1`; every other value is rejected with `UnsupportedSchema`. RosettaCue ships no schema migration code and no alternate document decoders: exactly one persisted representation is accepted at a time. This is intentional while the project format stabilizes.
+The current project schema version is **1**. Opening a package requires `PRAGMA user_version = 1`; every other value is rejected with `UnsupportedSchema`. RosettaCue ships no SQLite schema migration code and accepts exactly one table representation. The additive `ProjectMetadata.settings` object defaults when absent so earlier schema-1 packages remain readable without rewriting their database. This is intentional while the project format stabilizes.
 
 ## 7. Canonical subtitle model
 
@@ -573,7 +574,7 @@ Every text and ruby span has a required `styles` array. The allowed values are `
 
 Span normalization runs after every editor mutation and again at the Save Cue boundary. Adjacent ordinary text spans with the same canonical style array and color are maximally coalesced into one span. Ruby spans are semantic boundaries and never merge with surrounding text or another ruby span, even when their formats match. This rule makes a format toggle reversible: applying bold or color to a substring may temporarily split one run into three, but removing it joins compatible text runs back into one canonical span.
 
-The OCR style phase makes conservative decisions for the complete Cue. It returns italic only when every large main-subtitle row and glyph is consistently italic. It returns a named non-white color only when the main glyph interiors are clearly and uniformly that color; white, near-white, mixed, outlined, shadowed, and ambiguous cases use the default. The deterministic assembler applies the accepted format to every generated span. OCR never guesses substring formats. Fine-grained styles and colors are authored in the Inspector editor during human review.
+The OCR style phase makes conservative decisions for the complete Cue. It returns italic only when every large main-subtitle row and glyph is consistently italic. PGS supplies composed palette-indexed bitmaps, geometry, timing, and palette data, but no font family or semantic italic flag. Italic therefore cannot be recovered deterministically from PGS alone; pixel slant or glyph-shape analysis remains a heuristic unless an external font/template identity is known. It returns a named non-white color only when the main glyph interiors are clearly and uniformly that color; white, near-white, mixed, outlined, shadowed, and ambiguous cases use the default. The deterministic assembler applies the accepted format to every generated span. OCR never guesses substring formats. Fine-grained styles and colors are authored in the Inspector editor during human review.
 
 ### 7.3 Position and geometry
 
@@ -798,9 +799,9 @@ sequenceDiagram
 
   User->>UI: Translate Cue or Translate All
   UI->>Core: translate_cues(target, scope, profile)
-  Core->>Store: load latest non-translation source revisions
+  Core->>Store: load source revisions + project proper-noun mappings
   loop Selected/pending Cues
-    Core->>LLM: structured source + target language
+    Core->>LLM: structured source + target language + exact mappings
     LLM-->>Core: translated structured document
     Core->>Store: append translation revision
     Store->>Store: reset review_status
@@ -994,6 +995,7 @@ Ribbon tabs own only the ribbon command panel. Home gathers the high-frequency s
 - Search accepts Cue number or recognized/effective text.
 - Each row shows padded Cue index, start time, and latest effective text.
 - Latest revision wins; recognition is the fallback.
+- Pending or failed-to-recognize rows use subdued text, recognized/unreviewed rows use the normal treatment, and approved rows use a subtle semantic-success background.
 - Rows may appear incrementally during extraction.
 - Selection drives preview and Inspector without mutating the project.
 
@@ -1010,10 +1012,10 @@ Inspector is the resizable lower panel beneath Cue Comparison. It is the only ti
 - selected Cue identity and current statuses;
 - single-Cue OCR with overwrite semantics;
 - single-Cue translation;
-- explicit human review approval;
+- explicit human review approval with a Reviewed-button toggle back to unreviewed;
 - review-and-next navigation plus adjacent-Cue controls beside the review action;
 - visible OCR status beside the Inspector title rather than inside timing controls;
-- Cue revision-history viewing, restoration, and guarded deletion that retains at least one revision;
+- Cue revision-history viewing, a visible revision count beside its icon, restoration, and guarded deletion that retains at least one revision;
 - WYSIWYG text editing with selection-based bold, italic, underline, strikethrough, superscript, subscript, and font-color controls;
 - selection-based ruby creation, editing, removal, and over/under placement within one subtitle line;
 - preservation of ruby spans while editing surrounding styled ranges;
@@ -1028,7 +1030,7 @@ The Save button is disabled until the draft differs from the latest effective re
 Settings uses a left-section layout:
 
 - **General:** theme and media-tool diagnostics.
-- **Project:** OCR language and translation target language.
+- **Project:** OCR language, translation target language, and exact source-to-translation proper-noun mappings. These values persist in `ProjectMetadata` and never apply to an unrelated project.
 - **Models:** independent Text OCR, optional separate Ruby, Style, and post-OCR Translation profiles. A switch selects the two-request combined pipeline or the three-request separated pipeline and shows the corresponding phase numbers and cost/latency note.
 - **Advanced:** application-wide debug logging and the independent Debug Log window.
 
@@ -1088,7 +1090,7 @@ Within revisions, the newest append is effective regardless of author. Translati
 
 ### 11.4 Review invalidation
 
-Any new OCR, human, restored, or translation revision changes the evidence being reviewed. The Cue returns to `unreviewed`. Approval applies only to the revision referenced by its review decision.
+Any new OCR, human, restored, or translation revision changes the evidence being reviewed. The Cue returns to `unreviewed`. Approval applies only to the revision referenced by its review decision. A user may also append an explicit `unreviewed` decision by toggling the Reviewed Inspector action.
 
 ## 12. Failure handling and recovery
 

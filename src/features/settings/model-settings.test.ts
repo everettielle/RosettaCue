@@ -35,6 +35,7 @@ describe("workspace model settings persistence", () => {
 
     saveWorkspaceSettings(settings)
     const restored = loadWorkspaceSettings()
+    const persisted = [...storage.values()].join("\n")
 
     expect(restored.profiles.ocr.model).toBe("gemma-4-31b-it")
     expect(restored.separate_ruby_recognition).toBe(true)
@@ -43,15 +44,15 @@ describe("workspace model settings persistence", () => {
     expect(restored.profiles.validation.model).toBe("validator-local")
     expect(restored.profiles.translation.model).toBe("claude-opus-4-6")
     expect(restored.profiles.translation.api_key).toBeNull()
-    expect([...storage.values()].join("\n")).not.toContain("session-secret")
+    expect(persisted).not.toContain("session-secret")
+    expect(persisted).not.toContain("ocr_language")
+    expect(persisted).not.toContain("target_language")
   })
 
   it("uses combined recognition when a saved setting predates the ruby profile", () => {
     localStorage.setItem(
       "rosettacue.workspace-settings.v1",
       JSON.stringify({
-        ocr_language: "jpn",
-        target_language: "kor",
         profiles: {
           ocr: { ...defaultWorkspaceSettings.profiles.ocr, model: "ocr-local" },
           validation: defaultWorkspaceSettings.profiles.validation,

@@ -65,11 +65,14 @@ Blu-ray backup  ──▶  PGS extraction  ──▶  LLM OCR  ──▶  human 
   source bitmap and your structured subtitle in one shared canvas coordinate
   system, so position and scale are actually comparable.
 - **Translation.** Translate a cue or a whole track into a target language,
-  preserving timing and semantic position. Use **Save As** first to keep the
-  source language as its own project.
+  preserving timing and semantic position. Project-scoped proper-noun mappings
+  are injected into every translation prompt so names stay consistent without
+  leaking into another project. Use **Save As** first to keep the source
+  language as its own project.
 - **Review workflow.** Viewable Cue revision history with restore and guarded
-  deletion, revision-based undo/redo, explicit approval, and automatic
-  invalidation when new evidence arrives.
+  deletion, visible per-Cue revision counts, revision-based undo/redo, toggleable
+  approval, and automatic invalidation when new evidence arrives. Cue List
+  styling distinguishes pending OCR, review-pending, and reviewed Cues.
 - **Export.** Canonical JSON that retains geometry, ruby, per-span styles, review
   status, and OCR provenance — plus derived SRT with portable `<b>`/`<i>`/`<u>`
   markup and explicit warnings for everything SRT cannot represent.

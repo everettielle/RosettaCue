@@ -6,8 +6,6 @@ const STORAGE_KEY = "rosettacue.workspace-settings.v1"
 export type ModelTask = "ocr" | "ruby" | "validation" | "translation"
 
 export type WorkspaceSettings = {
-  ocr_language: string
-  target_language: string
   separate_ruby_recognition: boolean
   profiles: Record<ModelTask, ProviderConfig>
 }
@@ -32,8 +30,6 @@ export function providerDefaults(provider: LlmProvider): ProviderConfig {
 }
 
 export const defaultWorkspaceSettings: WorkspaceSettings = {
-  ocr_language: "jpn",
-  target_language: "kor",
   separate_ruby_recognition: false,
   profiles: {
     ocr: providerDefaults("lm_studio"),
@@ -67,10 +63,6 @@ export function loadWorkspaceSettings(): WorkspaceSettings {
     ) as Partial<WorkspaceSettings> | null
     if (stored?.profiles) {
       return {
-        ocr_language:
-          stored.ocr_language ?? defaultWorkspaceSettings.ocr_language,
-        target_language:
-          stored.target_language ?? defaultWorkspaceSettings.target_language,
         separate_ruby_recognition:
           stored.separate_ruby_recognition ??
           defaultWorkspaceSettings.separate_ruby_recognition,
