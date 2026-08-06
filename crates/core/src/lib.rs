@@ -598,12 +598,12 @@ impl Application {
         )
     }
 
-    /// Recognizes selected cues with independently configurable recognition and validation models.
+    /// Recognizes selected cues with independently configurable text, optional ruby, and style models.
     ///
     /// # Errors
     ///
     /// Returns an error when configuration, project persistence, image access,
-    /// or either LLM provider fails.
+    /// or any configured LLM provider fails.
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     pub fn recognize_ocr(
         self,

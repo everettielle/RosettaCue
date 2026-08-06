@@ -106,7 +106,7 @@ The source and translated projects are deliberately not modeled as parallel text
 6. **Transport independence.** Electron is an adapter; business behavior remains in Rust.
 7. **Least privilege.** The renderer has neither Node.js nor filesystem access.
 8. **Cue-boundary interruption.** Long OCR work pauses and stops only after a safe Cue transaction boundary.
-9. **Provider interchangeability.** OCR, validation, and translation choose provider profiles independently.
+9. **Provider interchangeability.** Main-text OCR, optional separate ruby recognition, style validation, and translation choose provider profiles independently.
 10. **One theme system.** shadcn semantic tokens drive both light and dark appearances.
 
 ## 3. Logical architecture
@@ -323,7 +323,7 @@ Request IDs permit concurrent out-of-order completion. A single Rust writer thre
 | `translate_cues`         | projectPath, Cue IDs, target language, overwrite, profile | job result                  | Yes                          |
 | `project_jobs`           | projectPath                                               | durable job list            | Recovery normalization       |
 | `cancel_project_job`     | projectPath, jobId                                        | job                         | Yes                          |
-| `configure_diagnostics`  | enabled                                                   | none                        | App preference              |
+| `configure_diagnostics`  | enabled                                                   | none                        | App preference               |
 | `resume_ocr_job`         | projectPath, jobId, pipeline                              | job result                  | Yes                          |
 | `resume_translation_job` | projectPath, jobId, profile                               | job result                  | Yes                          |
 | `pause_ocr`              | none                                                      | unit                        | In-memory controller         |
@@ -524,7 +524,7 @@ The current project schema version is **1**. Opening a package requires `PRAGMA 
   "end_ms": 2611,
   "position": "bottom-center",
   "subtitle": {
-    "prompt_version": "subtitle-ocr-v2",
+    "prompt_version": "subtitle-ocr-v5",
     "provider": "lmstudio",
     "model": "gemma-4-31b-it",
     "language": "jpn",
@@ -573,7 +573,7 @@ Every text and ruby span has a required `styles` array. The allowed values are `
 
 Span normalization runs after every editor mutation and again at the Save Cue boundary. Adjacent ordinary text spans with the same canonical style array and color are maximally coalesced into one span. Ruby spans are semantic boundaries and never merge with surrounding text or another ruby span, even when their formats match. This rule makes a format toggle reversible: applying bold or color to a substring may temporarily split one run into three, but removing it joins compatible text runs back into one canonical span.
 
-OCR Phase 2 makes conservative decisions for the complete Cue. It returns italic only when every large main-subtitle row and glyph is consistently italic. It returns a named non-white color only when the main glyph interiors are clearly and uniformly that color; white, near-white, mixed, outlined, shadowed, and ambiguous cases use the default. The deterministic assembler applies the accepted format to every generated span. OCR never guesses substring formats. Fine-grained styles and colors are authored in the Inspector editor during human review.
+The OCR style phase makes conservative decisions for the complete Cue. It returns italic only when every large main-subtitle row and glyph is consistently italic. It returns a named non-white color only when the main glyph interiors are clearly and uniformly that color; white, near-white, mixed, outlined, shadowed, and ambiguous cases use the default. The deterministic assembler applies the accepted format to every generated span. OCR never guesses substring formats. Fine-grained styles and colors are authored in the Inspector editor during human review.
 
 ### 7.3 Position and geometry
 
@@ -700,20 +700,29 @@ The UI can begin Cue review as soon as Cue events arrive; extraction completion 
 ```mermaid
 flowchart TD
   Input["Cue PNG + language preference"] --> Rows["Foreground projection: estimate large main rows"]
-  Rows --> P1["Phase 1: main text + ruby recognition"]
-  P1 --> Validate1{"Schema, text, row count, and ruby ranges valid?"}
-  Validate1 -->|No| Retry["Bounded corrective retry"] --> P1
-  Validate1 -->|Yes| P2["Phase 2: whole-Cue italic + color recognition"]
-  P2 --> Validate2{"Italic boolean and conservative color valid?"}
-  Validate2 -->|No| Retry2["Bounded corrective retry"] --> P2
-  Validate2 -->|Yes| Normalize["Language-specific normalization + span assembly"]
+  Rows --> Mode{"Separate ruby phase?"}
+  Mode -->|No| Combined["Phase 1: main text + ruby recognition"]
+  Combined --> ValidateCombined{"Text, row count, and ruby ranges valid?"}
+  ValidateCombined -->|No| RetryCombined["Bounded corrective retry"] --> Combined
+  Mode -->|Yes| Main["Phase 1: main-text recognition"]
+  Main --> ValidateMain{"Text schema and row count valid?"}
+  ValidateMain -->|No| RetryMain["Bounded corrective retry"] --> Main
+  ValidateMain -->|Yes| Canonical["Language-specific main-text normalization"]
+  Canonical --> Ruby["Phase 2: ruby recognition"]
+  Ruby --> ValidateRuby{"Annotation schema and exact ranges valid?"}
+  ValidateRuby -->|No| RetryRuby["Bounded corrective retry"] --> Ruby
+  ValidateCombined -->|Yes| Style["Whole-Cue italic + color recognition"]
+  ValidateRuby -->|Yes| Style
+  Style --> ValidateStyle{"Italic boolean and conservative color valid?"}
+  ValidateStyle -->|No| RetryStyle["Bounded corrective retry"] --> Style
+  ValidateStyle -->|Yes| Normalize["Span assembly"]
   Normalize --> Persist["Attempt + recognition + OCR revision"]
   Persist --> Event["Publish cue-complete"]
 ```
 
-Recognition and validation profiles may use different providers and models. Phase 1 uses `recognition` for main characters and ruby/furigana in one image request. Phase 2 uses `validation` for conservative whole-Cue italic and foreground-color classification. Both profiles therefore require vision-capable models. Provider configuration is validated before the job begins. Translation is a separate text-only operation after OCR.
+Recognition, optional ruby, and validation profiles may use different providers and models. With `ruby: null`, Phase 1 uses `recognition` for main characters and ruby/furigana in one image request, followed by style recognition. With a Ruby provider present, Phase 1 recognizes only large main text, the normalized main lines are supplied to the Ruby provider for Phase 2, and style recognition becomes Phase 3. The Ruby response contains annotations only and must reference an exact base substring in the supplied normalized lines. All OCR profiles require vision-capable models. Provider configuration is validated before the job begins; the Ruby profile is required only in separate mode. Translation is a separate text-only operation after OCR.
 
-Before the first provider request, the OCR crate decodes the PNG and projects foreground pixels onto the vertical axis. Contiguous row clusters near the maximum glyph-row height are counted as likely large main rows; shorter clusters are treated as ruby candidates. When the estimate is reliable, Phase 1 must return exactly that many main lines. A mismatch is rejected and retried, preventing a syntactically valid one-line response from silently dropping a second visible row. The estimate recognizes layout only and never substitutes for character OCR.
+Before the first provider request, the OCR crate decodes the PNG and projects foreground pixels onto the vertical axis. Contiguous row clusters near the maximum glyph-row height are counted as likely large main rows; shorter clusters are treated as ruby candidates. When the estimate is reliable, the stage responsible for main-text recognition must return exactly that many main lines. A mismatch is rejected and retried, preventing a syntactically valid one-line response from silently dropping a second visible row. The estimate recognizes layout only and never substitutes for character OCR.
 
 For Japanese, normalization records every change and applies language-specific
 punctuation and character rules. The canonical long-vowel mark is `ー`;
@@ -1020,7 +1029,7 @@ Settings uses a left-section layout:
 
 - **General:** theme and media-tool diagnostics.
 - **Project:** OCR language and translation target language.
-- **Models:** independent Phase 1 OCR, Phase 2 validation/style, and post-OCR translation profiles with task-specific capability descriptions.
+- **Models:** independent Text OCR, optional separate Ruby, Style, and post-OCR Translation profiles. A switch selects the two-request combined pipeline or the three-request separated pipeline and shows the corresponding phase numbers and cost/latency note.
 - **Advanced:** application-wide debug logging and the independent Debug Log window.
 
 Supported providers are LM Studio, Ollama, OpenAI API, and Anthropic API. A profile contains provider, base URL, model, optional session API key, timeout, token limit, and attempt count. API keys remain only in renderer memory and are redacted from local preferences and project records.
@@ -1273,12 +1282,14 @@ A packaged smoke test verifies:
 15. IPC methods and events must be present in both main/preload allowlists.
 16. Standard output from the sidecar contains only one JSON object per line.
 17. Project opening rejects every schema version other than the current version.
-18. A reliable bitmap row estimate and the accepted Phase 1 main-line count must agree.
+18. A reliable bitmap row estimate and the accepted main-text stage line count must agree.
 19. Styled spans compose exactly to `OcrLine.text`; every span has a required canonical style array and at most one optional `#RRGGBB` color.
 20. A span cannot contain duplicate styles or both superscript and subscript.
 21. A ruby annotation has a non-empty exact base range within one line and at least one non-empty over/under annotation.
 22. Adjacent ordinary text spans with identical canonical style arrays and colors are maximally coalesced; ruby boundaries are preserved.
 23. Revision deletion retains at least one effective revision for the Cue and invalidates its review status.
+24. `ruby: null` selects combined text/ruby recognition; a Ruby provider selects ordered main-text, ruby, and style phases.
+25. Separate Ruby annotations are validated against language-normalized main lines before persistence.
 
 ## 18. Conformance summary
 
@@ -1289,7 +1300,7 @@ The current baseline conforms to the following functional surface:
 - right-aligned ribbon statistics and native title-bar alignment;
 - resizable Cue List and vertically split Preview/Inspector editing surface;
 - structured side-by-side Cue rendering in one shared Blu-ray canvas coordinate system;
-- two-phase, row-count-verified OCR with combined text/ruby recognition and conservative whole-Cue italic/color recognition;
+- selectable row-count-verified OCR with combined text/ruby recognition or ordered main-text and dedicated Ruby phases, followed by conservative whole-Cue italic/color recognition;
 - selection-based rich subtitle editing with six structured span styles, font color, and editable over/under ruby;
 - explicit Cue draft save with content, timing, and position editing;
 - project clone, source import, PGS extraction, export dialogs;

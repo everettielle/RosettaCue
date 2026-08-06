@@ -72,6 +72,7 @@ import {
   loadWorkspaceSettings,
   saveWorkspaceSettings,
   validateProviderConfig,
+  type ModelTask,
   type WorkspaceSettings,
 } from "@/features/settings/model-settings"
 import { SettingsDialog } from "@/features/settings/settings-dialog"
@@ -820,7 +821,7 @@ export function ProjectWorkspace({
     }
   }
 
-  const requireModel = (task: "ocr" | "validation" | "translation") => {
+  const requireModel = (task: ModelTask) => {
     const message = validateProviderConfig(settings.profiles[task])
     if (message) {
       setError(message)
@@ -832,7 +833,12 @@ export function ProjectWorkspace({
   }
 
   const runOcr = async (cueIds?: string[]) => {
-    if (!requireModel("ocr") || !requireModel("validation")) return
+    if (
+      !requireModel("ocr") ||
+      (settings.separate_ruby_recognition && !requireModel("ruby")) ||
+      !requireModel("validation")
+    )
+      return
     setError(null)
     setOcrState("running")
     setOcrProgress(null)
@@ -845,6 +851,9 @@ export function ProjectWorkspace({
         overwrite: Boolean(cueIds),
         config: {
           recognition: settings.profiles.ocr,
+          ruby: settings.separate_ruby_recognition
+            ? settings.profiles.ruby
+            : null,
           validation: settings.profiles.validation,
         },
       })

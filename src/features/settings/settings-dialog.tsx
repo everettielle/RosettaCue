@@ -82,21 +82,28 @@ const providers: Array<{ value: LlmProvider; label: string }> = [
 
 const tasks: Array<{ value: ModelTask; label: string }> = [
   { value: "ocr", label: m.settings_task_ocr() },
+  { value: "ruby", label: m.settings_task_ruby() },
   { value: "validation", label: m.settings_task_validation() },
   { value: "translation", label: m.settings_task_translation() },
 ]
 
-function taskHelp(task: ModelTask) {
+function taskHelp(task: ModelTask, separateRuby: boolean) {
   const help: Record<
     ModelTask,
     { phase: () => string; description: () => string }
   > = {
     ocr: {
-      phase: m.settings_phase_1,
-      description: m.settings_task_ocr_description,
+      phase: separateRuby ? m.settings_phase_1 : m.settings_phase_1_combined,
+      description: separateRuby
+        ? m.settings_task_ocr_separate_description
+        : m.settings_task_ocr_description,
+    },
+    ruby: {
+      phase: m.settings_phase_2_ruby,
+      description: m.settings_task_ruby_description,
     },
     validation: {
-      phase: m.settings_phase_2,
+      phase: separateRuby ? m.settings_phase_3 : m.settings_phase_2,
       description: m.settings_task_validation_description,
     },
     translation: {
@@ -240,6 +247,25 @@ export function SettingsDialog({
       api_key: null,
     })
     setModels((current) => ({ ...current, [activeTask]: [] }))
+  }
+
+  const changeRubySeparation = (separate_ruby_recognition: boolean) => {
+    setDraft((current) => ({
+      ...current,
+      separate_ruby_recognition,
+      profiles:
+        separate_ruby_recognition && !current.profiles.ruby.model.trim()
+          ? {
+              ...current.profiles,
+              ruby: { ...current.profiles.ocr },
+            }
+          : current.profiles,
+    }))
+    if (!separate_ruby_recognition && activeTask === "ruby") {
+      setActiveTask("ocr")
+    }
+    setDiagnostic(null)
+    setError(null)
   }
 
   const refreshModels = async (diagnose: boolean) => {
@@ -437,6 +463,21 @@ export function SettingsDialog({
                     {m.settings_task_models_description()}
                   </p>
                 </div>
+                <Field orientation="horizontal">
+                  <FieldContent>
+                    <FieldLabel htmlFor="separate-ruby-recognition">
+                      {m.settings_separate_ruby_recognition()}
+                    </FieldLabel>
+                    <FieldDescription>
+                      {m.settings_separate_ruby_recognition_description()}
+                    </FieldDescription>
+                  </FieldContent>
+                  <Switch
+                    id="separate-ruby-recognition"
+                    checked={draft.separate_ruby_recognition}
+                    onCheckedChange={changeRubySeparation}
+                  />
+                </Field>
                 <Tabs
                   value={activeTask}
                   onValueChange={(value) => {
@@ -451,6 +492,10 @@ export function SettingsDialog({
                         key={task.value}
                         value={task.value}
                         className="flex-1"
+                        disabled={
+                          task.value === "ruby" &&
+                          !draft.separate_ruby_recognition
+                        }
                       >
                         {task.label}
                         {draft.profiles[task.value].model && (
@@ -461,9 +506,17 @@ export function SettingsDialog({
                   </TabsList>
                 </Tabs>
                 <Alert>
-                  <AlertTitle>{taskHelp(activeTask).phase()}</AlertTitle>
+                  <AlertTitle>
+                    {taskHelp(
+                      activeTask,
+                      draft.separate_ruby_recognition
+                    ).phase()}
+                  </AlertTitle>
                   <AlertDescription>
-                    {taskHelp(activeTask).description()}
+                    {taskHelp(
+                      activeTask,
+                      draft.separate_ruby_recognition
+                    ).description()}
                   </AlertDescription>
                 </Alert>
                 <FieldGroup>

@@ -197,6 +197,7 @@ export type ProviderConfig = {
 
 export type OcrPipelineConfig = {
   recognition: ProviderConfig
+  ruby: ProviderConfig | null
   validation: ProviderConfig
 }
 

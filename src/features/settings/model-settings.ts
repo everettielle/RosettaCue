@@ -3,11 +3,12 @@ import * as m from "@/paraglide/messages.js"
 
 const STORAGE_KEY = "rosettacue.workspace-settings.v1"
 
-export type ModelTask = "ocr" | "validation" | "translation"
+export type ModelTask = "ocr" | "ruby" | "validation" | "translation"
 
 export type WorkspaceSettings = {
   ocr_language: string
   target_language: string
+  separate_ruby_recognition: boolean
   profiles: Record<ModelTask, ProviderConfig>
 }
 
@@ -33,8 +34,10 @@ export function providerDefaults(provider: LlmProvider): ProviderConfig {
 export const defaultWorkspaceSettings: WorkspaceSettings = {
   ocr_language: "jpn",
   target_language: "kor",
+  separate_ruby_recognition: false,
   profiles: {
     ocr: providerDefaults("lm_studio"),
+    ruby: providerDefaults("lm_studio"),
     validation: providerDefaults("lm_studio"),
     translation: {
       ...providerDefaults("lm_studio"),
@@ -68,10 +71,17 @@ export function loadWorkspaceSettings(): WorkspaceSettings {
           stored.ocr_language ?? defaultWorkspaceSettings.ocr_language,
         target_language:
           stored.target_language ?? defaultWorkspaceSettings.target_language,
+        separate_ruby_recognition:
+          stored.separate_ruby_recognition ??
+          defaultWorkspaceSettings.separate_ruby_recognition,
         profiles: {
           ocr: mergeProfile(
             stored.profiles.ocr,
             defaultWorkspaceSettings.profiles.ocr
+          ),
+          ruby: mergeProfile(
+            stored.profiles.ruby,
+            defaultWorkspaceSettings.profiles.ruby
           ),
           validation: mergeProfile(
             stored.profiles.validation,
@@ -95,6 +105,7 @@ export function saveWorkspaceSettings(settings: WorkspaceSettings) {
     ...settings,
     profiles: {
       ocr: { ...settings.profiles.ocr, api_key: null },
+      ruby: { ...settings.profiles.ruby, api_key: null },
       validation: { ...settings.profiles.validation, api_key: null },
       translation: { ...settings.profiles.translation, api_key: null },
     },

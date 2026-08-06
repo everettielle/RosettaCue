@@ -50,10 +50,11 @@ Blu-ray backup  ──▶  PGS extraction  ──▶  LLM OCR  ──▶  human 
   presentation set to a PNG cue with exact timing and canvas geometry, and
   publishes cues to the UI incrementally so you can start reviewing before
   extraction finishes.
-- **LLM OCR with verification.** A two-phase pipeline recognizes main text and
-  ruby annotations together, then conservatively classifies whole-Cue italics
-  and clear non-white text color. Both phases are schema-validated with bounded
-  corrective retries. Before the first request, a foreground-pixel projection
+- **LLM OCR with verification.** A selectable pipeline recognizes main text and
+  ruby annotations either together or in consecutive, independently configured
+  vision passes, then conservatively classifies whole-Cue italics and clear
+  non-white text color. Every phase is schema-validated with bounded corrective
+  retries. Before the first request, a foreground-pixel projection
   estimates how many large glyph rows the bitmap actually contains, and a
   response whose line count disagrees is rejected. That single check kills the
   most common silent failure: a syntactically perfect one-line answer for a
@@ -79,18 +80,19 @@ RosettaCue has no account, no cloud sync, and no telemetry. A project is a
 `.rosettacue` directory package on your disk containing a SQLite database and the
 cue assets. You choose which model provider sees your images:
 
-| Provider | Runs | Notes |
-| --- | --- | --- |
-| **LM Studio** | Locally | OpenAI-compatible endpoint, default `http://127.0.0.1:1234/v1` |
-| **Ollama** | Locally | OpenAI-compatible endpoint |
-| **OpenAI API** | Remote | Cue images leave your machine |
-| **Anthropic API** | Remote | Cue images leave your machine |
+| Provider          | Runs    | Notes                                                          |
+| ----------------- | ------- | -------------------------------------------------------------- |
+| **LM Studio**     | Locally | OpenAI-compatible endpoint, default `http://127.0.0.1:1234/v1` |
+| **Ollama**        | Locally | OpenAI-compatible endpoint                                     |
+| **OpenAI API**    | Remote  | Cue images leave your machine                                  |
+| **Anthropic API** | Remote  | Cue images leave your machine                                  |
 
-OCR, validation, and translation are configured as three independent profiles.
-OCR drives Phase 1 character and ruby recognition; validation drives Phase 2
-italic and color recognition; translation runs afterward on text. You can use a
-large local vision model for Phase 1 and something cheaper for Phase 2 — or vice
-versa. API keys live in renderer memory for the session only;
+Text OCR, ruby, style, and translation are configured as independent profiles.
+By default, Text OCR recognizes characters and ruby together before the Style
+phase. Enabling the separate Ruby phase runs main-text recognition first, Ruby
+recognition second, and Style recognition third. The Ruby profile can use the
+same vision model as Text OCR or a dedicated model tuned for small annotations.
+Translation runs afterward on text. API keys live in renderer memory for the session only;
 they are never written to the project package, preferences, logs, or exports.
 
 ## Status
@@ -102,13 +104,13 @@ Do not use RosettaCue for archival work you cannot redo.
 
 ## Requirements
 
-| | |
-| --- | --- |
-| Node.js | 24 or newer |
-| pnpm | 11.20.0, via Corepack |
-| Rust | 1.97.1 or newer (edition 2024) |
-| Media tools | `bd_list_titles`, `bd_splice`, `ffmpeg` — see below |
-| Platform | macOS, Windows, or Linux, plus the usual Electron and Rust build toolchains |
+|             |                                                                             |
+| ----------- | --------------------------------------------------------------------------- |
+| Node.js     | 24 or newer                                                                 |
+| pnpm        | 11.20.0, via Corepack                                                       |
+| Rust        | 1.97.1 or newer (edition 2024)                                              |
+| Media tools | `bd_list_titles`, `bd_splice`, `ffmpeg` — see below                         |
+| Platform    | macOS, Windows, or Linux, plus the usual Electron and Rust build toolchains |
 
 ### Media tools
 
@@ -228,11 +230,18 @@ cargo run -p rosettacue-cli -- source attach ~/Subs/Belle.rosettacue /Volumes/BE
 cargo run -p rosettacue-cli -- source extract ~/Subs/Belle.rosettacue <source-id> --title 1
 cargo run -p rosettacue-cli -- ocr run ~/Subs/Belle.rosettacue \
   --provider lm-studio --model <model-id> --language jpn
+cargo run -p rosettacue-cli -- ocr run ~/Subs/Belle.rosettacue \
+  --provider lm-studio --model <text-model-id> --language jpn \
+  --separate-ruby --ruby-model <ruby-model-id>
 cargo run -p rosettacue-cli -- export ~/Subs/Belle.rosettacue --output ~/Subs --format srt
 ```
 
 Remote providers read their key from an environment variable you name with
-`--api-key-env`; the key is never taken as a literal argument.
+`--api-key-env`; the key is never taken as a literal argument. In separate mode,
+Ruby options inherit the main Text OCR profile when the provider is omitted or
+matches the main provider. Selecting a different Ruby provider uses that
+provider's default endpoint and requires its own model and, when applicable,
+credentials.
 
 ## Repository layout
 

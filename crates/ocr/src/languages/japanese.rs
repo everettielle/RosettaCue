@@ -9,7 +9,7 @@ static DOT_ELLIPSIS: LazyLock<Regex> =
 
 const MAIN_TEXT_INSTRUCTION: &str = r"Use Japanese full-width punctuation and symbols. Convert ASCII or halfwidth symbols such as ()!? punctuation, quotes, and brackets to their full-width forms, but keep Latin letters and digits unchanged. Use the full-width Japanese centered ellipsis ⋯ (U+22EF, LaTeX \cdots), never … or three ASCII/fullwidth periods. Use the Japanese prolonged sound mark ー (U+30FC) for an ambiguous long horizontal sound mark; normalize —, ―, and halfwidth ｰ to ー.";
 
-const ANNOTATION_INSTRUCTION: &str = r"For Japanese okurigana, exclude unannotated kana from the base: small つかさど over 司る has base 司. Small ボイシス below “Voices” has base Voices and position under.";
+const ANNOTATION_INSTRUCTION: &str = r"Choose each base from visual horizontal alignment in the bitmap. Use the smallest exact contiguous substring directly above or below the annotation: prefer the main glyph under its horizontal center, and add neighboring glyphs only when the annotation visibly spans them. For kana readings in mixed kanji-kana text, choose the aligned lexical kanji or other non-kana glyphs; exclude particles, okurigana, and inflectional kana outside the annotation span. Never use punctuation, brackets, spacing or sound-length marks, ellipses, or other standalone symbols as the sole base. Use a kana-only base only when the annotation is clearly aligned with lexical kana and no kanji in the same visual word is a plausible aligned base. Use pronunciation only to reject an implausible visual candidate, never to expand the base. Apply the same minimum-range rule to Latin letters and digits.";
 
 pub(super) const PRESET: LanguagePreset = LanguagePreset::new(
     "jpn",

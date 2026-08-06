@@ -26,6 +26,8 @@ pub type LmStudioBackend = ProviderOcrBackend;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OcrPipelineConfig {
     pub recognition: ProviderConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ruby: Option<ProviderConfig>,
     pub validation: ProviderConfig,
 }
 
@@ -34,6 +36,7 @@ impl OcrPipelineConfig {
     pub fn single(config: ProviderConfig) -> Self {
         Self {
             recognition: config.clone(),
+            ruby: None,
             validation: config,
         }
     }
@@ -42,6 +45,7 @@ impl OcrPipelineConfig {
     pub fn redacted(&self) -> Self {
         Self {
             recognition: self.recognition.redacted(),
+            ruby: self.ruby.as_ref().map(ProviderConfig::redacted),
             validation: self.validation.redacted(),
         }
     }
@@ -56,12 +60,25 @@ impl Default for OcrPipelineConfig {
 pub struct ProviderOcrBackend {
     config: OcrPipelineConfig,
     recognition_client: ProviderClient,
+    ruby_client: Option<ProviderClient>,
     validation_client: ProviderClient,
 }
 
 #[derive(Debug, Deserialize)]
 struct RecognitionResponse {
     lines: Vec<TextValue>,
+    annotations: Vec<RawAnnotation>,
+    unreadable: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct MainTextResponse {
+    lines: Vec<TextValue>,
+    unreadable: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct RubyResponse {
     annotations: Vec<RawAnnotation>,
     unreadable: bool,
 }
@@ -95,6 +112,17 @@ struct StyleResponse {
     color: String,
 }
 
+struct CharacterStageResult {
+    recognition: RecognitionResponse,
+    response: CompletionResponse,
+    combined: Option<Value>,
+    main_text: Option<Value>,
+    ruby: Option<Value>,
+    usage: Value,
+    ruby_usage: Option<Value>,
+    mode: &'static str,
+}
+
 impl ProviderOcrBackend {
     /// Creates a validated OCR backend using one provider for every pass.
     ///
@@ -105,17 +133,23 @@ impl ProviderOcrBackend {
         Self::with_pipeline(OcrPipelineConfig::single(config))
     }
 
-    /// Creates an OCR backend with independent recognition and validation providers.
+    /// Creates an OCR backend with independent text, optional ruby, and style providers.
     ///
     /// # Errors
     ///
-    /// Returns an error when either provider configuration is invalid.
+    /// Returns an error when any configured provider is invalid.
     pub fn with_pipeline(config: OcrPipelineConfig) -> Result<Self, OcrError> {
         let recognition_client = ProviderClient::new(config.recognition.clone())?;
+        let ruby_client = config
+            .ruby
+            .as_ref()
+            .map(|ruby| ProviderClient::new(ruby.clone()))
+            .transpose()?;
         let validation_client = ProviderClient::new(config.validation.clone())?;
         Ok(Self {
             config,
             recognition_client,
+            ruby_client,
             validation_client,
         })
     }
@@ -206,21 +240,95 @@ impl ProviderOcrBackend {
         )))
     }
 
+    fn recognize_characters(
+        &self,
+        image_base64: &str,
+        expected_main_rows: Option<usize>,
+        language: &LanguagePreset,
+        request: &OcrRequest,
+    ) -> Result<CharacterStageResult, OcrError> {
+        if let Some(ruby_client) = &self.ruby_client {
+            let (main_text, main_text_response, _) = Self::run_stage(
+                &self.recognition_client,
+                image_base64,
+                "main_text_recognition",
+                &prompt::main_text_recognition(language, expected_main_rows),
+                &main_text_schema(),
+                request,
+                |content| validate_main_text(content, expected_main_rows, language),
+            )?;
+            let normalized_main_lines = normalized_main_lines(&main_text.lines, language)?;
+            let (ruby, ruby_response, _) = Self::run_stage(
+                ruby_client,
+                image_base64,
+                "ruby_recognition",
+                &prompt::ruby_recognition(language, &normalized_main_lines),
+                &ruby_schema(),
+                request,
+                |content| validate_ruby(content, &normalized_main_lines, language),
+            )?;
+            let recognition = RecognitionResponse {
+                lines: main_text.lines,
+                annotations: ruby.annotations,
+                unreadable: main_text.unreadable || ruby.unreadable,
+            };
+            let main_text_stage = parse_json_content(&main_text_response.content)?;
+            let ruby_stage = parse_json_content(&ruby_response.content)?;
+            let recognition_usage = main_text_response.usage.clone();
+            let ruby_usage = Some(ruby_response.usage);
+            Ok(CharacterStageResult {
+                recognition,
+                response: main_text_response,
+                combined: None,
+                main_text: Some(main_text_stage),
+                ruby: Some(ruby_stage),
+                usage: recognition_usage,
+                ruby_usage,
+                mode: "separate_ruby",
+            })
+        } else {
+            let (recognition, response, _) = Self::run_stage(
+                &self.recognition_client,
+                image_base64,
+                "combined_recognition",
+                &prompt::combined_recognition(language, expected_main_rows),
+                &combined_recognition_schema(),
+                request,
+                |content| validate_recognition(content, expected_main_rows, language),
+            )?;
+            let combined_stage = parse_json_content(&response.content)?;
+            let recognition_usage = response.usage.clone();
+            Ok(CharacterStageResult {
+                recognition,
+                response,
+                combined: Some(combined_stage),
+                main_text: None,
+                ruby: None,
+                usage: recognition_usage,
+                ruby_usage: None,
+                mode: "combined",
+            })
+        }
+    }
+
     fn recognize_inner(&self, request: &OcrRequest) -> Result<OcrRecognition, OcrError> {
         let language = languages::resolve(&request.language)?;
         let started = Instant::now();
         let image = std::fs::read(&request.image_path)?;
         let expected_main_rows = estimate_main_rows(&image);
         let image_base64 = BASE64.encode(image);
-        let (recognition, recognition_response, _) = Self::run_stage(
-            &self.recognition_client,
-            &image_base64,
-            "recognition",
-            &prompt::recognition(language, expected_main_rows),
-            &recognition_schema(),
-            request,
-            |content| validate_recognition(content, expected_main_rows, language),
-        )?;
+        let character =
+            self.recognize_characters(&image_base64, expected_main_rows, language, request)?;
+        let CharacterStageResult {
+            recognition,
+            response: recognition_response,
+            combined: combined_stage,
+            main_text: main_text_stage,
+            ruby: ruby_stage,
+            usage: recognition_usage,
+            ruby_usage,
+            mode: pipeline_mode,
+        } = character;
         let main_lines = recognition
             .lines
             .iter()
@@ -233,7 +341,7 @@ impl ProviderOcrBackend {
         let (style, style_response, _) = Self::run_stage(
             &self.validation_client,
             &image_base64,
-            "style",
+            "style_recognition",
             &prompt::whole_cue_style(language, &main_lines),
             &style_schema(),
             request,
@@ -248,12 +356,22 @@ impl ProviderOcrBackend {
             .clone()
             .unwrap_or_else(|| self.config.recognition.model.clone());
         let raw_response = serde_json::to_string(&json!({
-            "recognition": parse_json_content(&recognition_response.content)?,
-            "style": parse_json_content(&style_response.content)?,
+            "pipeline_mode": pipeline_mode,
+            "stages": {
+                "combined_recognition": combined_stage,
+                "main_text_recognition": main_text_stage,
+                "ruby_recognition": ruby_stage,
+                "style_recognition": parse_json_content(&style_response.content)?,
+            },
             "row_estimate": expected_main_rows,
-            "usage": [recognition_response.usage, style_response.usage],
+            "usage": {
+                "recognition": recognition_usage,
+                "ruby": ruby_usage,
+                "style": style_response.usage,
+            },
             "providers": {
                 "recognition": self.config.recognition.redacted(),
+                "ruby": self.config.ruby.as_ref().map(ProviderConfig::redacted),
                 "validation": self.config.validation.redacted()
             }
         }))?;
@@ -275,8 +393,19 @@ impl ProviderOcrBackend {
 
 impl OcrBackend for ProviderOcrBackend {
     fn backend_id(&self) -> String {
+        let ruby = self.config.ruby.as_ref().map_or_else(
+            || "combined".to_owned(),
+            |config| {
+                format!(
+                    "{}:{}:{}",
+                    config.provider.as_str(),
+                    config.base_url.trim_end_matches('/'),
+                    config.model
+                )
+            },
+        );
         format!(
-            "{}:{}:{};validation={}:{}:{}",
+            "{}:{}:{};ruby={ruby};validation={}:{}:{}",
             self.config.recognition.provider.as_str(),
             self.config.recognition.base_url.trim_end_matches('/'),
             self.config.recognition.model,
@@ -381,26 +510,79 @@ fn validate_recognition(
     language: &LanguagePreset,
 ) -> Result<RecognitionResponse, OcrError> {
     let response = serde_json::from_value::<RecognitionResponse>(parse_json_content(content)?)?;
-    if response.lines.is_empty() {
+    let main_lines = validate_main_lines(&response.lines, expected_main_rows, language)?;
+    validate_annotations(&response.annotations, &main_lines, language)?;
+    Ok(response)
+}
+
+fn validate_main_text(
+    content: &str,
+    expected_main_rows: Option<usize>,
+    language: &LanguagePreset,
+) -> Result<MainTextResponse, OcrError> {
+    let response = serde_json::from_value::<MainTextResponse>(parse_json_content(content)?)?;
+    validate_main_lines(&response.lines, expected_main_rows, language)?;
+    Ok(response)
+}
+
+fn validate_ruby(
+    content: &str,
+    main_lines: &[String],
+    language: &LanguagePreset,
+) -> Result<RubyResponse, OcrError> {
+    let response = serde_json::from_value::<RubyResponse>(parse_json_content(content)?)?;
+    validate_annotations(&response.annotations, main_lines, language)?;
+    Ok(response)
+}
+
+fn validate_main_lines(
+    lines: &[TextValue],
+    expected_main_rows: Option<usize>,
+    language: &LanguagePreset,
+) -> Result<Vec<String>, OcrError> {
+    if lines.is_empty() {
         return Err(OcrError::Validation("main text has no lines".to_owned()));
     }
     if let Some(expected) = expected_main_rows
-        && response.lines.len() != expected
+        && lines.len() != expected
     {
         return Err(OcrError::Validation(format!(
             "bitmap analysis found {expected} large main-text rows, but the response returned {}",
-            response.lines.len()
+            lines.len()
         )));
     }
-    let mut main_lines = Vec::with_capacity(response.lines.len());
-    for line in &response.lines {
+    let mut main_lines = Vec::with_capacity(lines.len());
+    for line in lines {
         let (normalized, _) = language.normalize(&line.text)?;
         if normalized.is_empty() {
             return Err(OcrError::Validation("main text line is empty".to_owned()));
         }
         main_lines.push(normalized);
     }
-    for annotation in &response.annotations {
+    Ok(main_lines)
+}
+
+fn normalized_main_lines(
+    lines: &[TextValue],
+    language: &LanguagePreset,
+) -> Result<Vec<String>, OcrError> {
+    lines
+        .iter()
+        .map(|line| {
+            language
+                .normalize(&line.text)
+                .map(|(normalized, _)| normalized)
+        })
+        .collect()
+}
+
+fn validate_annotations(
+    annotations: &[RawAnnotation],
+    main_lines: &[String],
+    language: &LanguagePreset,
+) -> Result<(), OcrError> {
+    let mut ranges_by_line: HashMap<u32, Vec<(usize, usize)>> = HashMap::new();
+    for annotation in annotations {
         if annotation.line_index == 0
             || usize::try_from(annotation.line_index).map_or(true, |index| index > main_lines.len())
             || annotation.base_occurrence == 0
@@ -419,13 +601,24 @@ fn validate_recognition(
         }
         let line = &main_lines[usize::try_from(annotation.line_index - 1)
             .map_err(|_| OcrError::Validation("line index is too large".to_owned()))?];
-        if find_occurrence(line, &annotation_base, annotation.base_occurrence).is_none() {
-            return Err(OcrError::Validation(format!(
-                "annotation base was not found: {annotation_base}"
-            )));
+        let start = find_occurrence(line, &annotation_base, annotation.base_occurrence)
+            .ok_or_else(|| {
+                OcrError::Validation(format!("annotation base was not found: {annotation_base}"))
+            })?;
+        ranges_by_line
+            .entry(annotation.line_index)
+            .or_default()
+            .push((start, start + annotation_base.len()));
+    }
+    for ranges in ranges_by_line.values_mut() {
+        ranges.sort_unstable();
+        for pair in ranges.windows(2) {
+            if pair[1].0 < pair[0].1 && pair[0] != pair[1] {
+                return Err(OcrError::Validation("ruby ranges overlap".to_owned()));
+            }
         }
     }
-    Ok(response)
+    Ok(())
 }
 
 fn validate_whole_cue_style(content: &str) -> Result<StyleResponse, OcrError> {
@@ -603,8 +796,16 @@ fn add_records(
     }));
 }
 
-fn recognition_schema() -> Value {
+fn combined_recognition_schema() -> Value {
     json!({ "type": "json_schema", "json_schema": { "name": "subtitle_character_recognition", "strict": true, "schema": { "type": "object", "properties": { "lines": { "type": "array", "minItems": 1, "items": { "type": "object", "properties": { "text": { "type": "string" } }, "required": ["text"], "additionalProperties": false } }, "annotations": { "type": "array", "items": { "type": "object", "properties": { "line_index": { "type": "integer", "minimum": 1 }, "text": { "type": "string" }, "base": { "type": "string" }, "base_occurrence": { "type": "integer", "minimum": 1 }, "position": { "enum": ["over", "under"] } }, "required": ["line_index", "text", "base", "base_occurrence", "position"], "additionalProperties": false } }, "unreadable": { "type": "boolean" } }, "required": ["lines", "annotations", "unreadable"], "additionalProperties": false } } })
+}
+
+fn main_text_schema() -> Value {
+    json!({ "type": "json_schema", "json_schema": { "name": "subtitle_main_text_recognition", "strict": true, "schema": { "type": "object", "properties": { "lines": { "type": "array", "minItems": 1, "items": { "type": "object", "properties": { "text": { "type": "string" } }, "required": ["text"], "additionalProperties": false } }, "unreadable": { "type": "boolean" } }, "required": ["lines", "unreadable"], "additionalProperties": false } } })
+}
+
+fn ruby_schema() -> Value {
+    json!({ "type": "json_schema", "json_schema": { "name": "subtitle_ruby_recognition", "strict": true, "schema": { "type": "object", "properties": { "annotations": { "type": "array", "items": { "type": "object", "properties": { "line_index": { "type": "integer", "minimum": 1 }, "text": { "type": "string" }, "base": { "type": "string" }, "base_occurrence": { "type": "integer", "minimum": 1 }, "position": { "enum": ["over", "under"] } }, "required": ["line_index", "text", "base", "base_occurrence", "position"], "additionalProperties": false } }, "unreadable": { "type": "boolean" } }, "required": ["annotations", "unreadable"], "additionalProperties": false } } })
 }
 
 fn style_schema() -> Value {
@@ -626,6 +827,26 @@ mod tests {
         .expect("legacy OCR pipeline config");
 
         assert!(config.recognition.model.is_empty());
+        assert!(config.ruby.is_none());
+    }
+
+    #[test]
+    fn redacts_the_optional_ruby_provider() {
+        let provider = ProviderConfig {
+            api_key: Some("session-secret".to_owned()),
+            ..ProviderConfig::default()
+        };
+        let config = OcrPipelineConfig {
+            recognition: provider.clone(),
+            ruby: Some(provider.clone()),
+            validation: provider,
+        };
+
+        let redacted = config.redacted();
+
+        assert!(redacted.recognition.api_key.is_none());
+        assert!(redacted.ruby.expect("ruby profile").api_key.is_none());
+        assert!(redacted.validation.api_key.is_none());
     }
 
     #[test]
@@ -641,6 +862,54 @@ mod tests {
             assemble_lines(recognition, false, None, language).expect("assemble lines");
         assert_eq!(lines[0].text, "司る");
         assert!(matches!(lines[0].spans[0], OcrSpan::Ruby { .. }));
+    }
+
+    #[test]
+    fn validates_split_ruby_against_normalized_main_text() {
+        let language = languages::resolve("jpn").expect("Japanese preset");
+        let main = validate_main_text(
+            r#"{"lines":[{"text":"(司る)"}],"unreadable":false}"#,
+            Some(1),
+            language,
+        )
+        .expect("main text response");
+        let normalized = normalized_main_lines(&main.lines, language).expect("normalized lines");
+        assert_eq!(normalized, ["（司る）"]);
+        let ruby = validate_ruby(
+            r#"{"annotations":[{"line_index":1,"text":"つかさど","base":"司","base_occurrence":1,"position":"over"}],"unreadable":false}"#,
+            &normalized,
+            language,
+        )
+        .expect("ruby response");
+        let recognition = RecognitionResponse {
+            lines: main.lines,
+            annotations: ruby.annotations,
+            unreadable: main.unreadable || ruby.unreadable,
+        };
+
+        let (lines, records) =
+            assemble_lines(recognition, false, None, language).expect("assembled lines");
+
+        assert_eq!(lines[0].text, "（司る）");
+        assert!(matches!(lines[0].spans[1], OcrSpan::Ruby { .. }));
+        assert!(
+            records
+                .iter()
+                .any(|record| record.rule == "japanese-fullwidth-symbol-v1")
+        );
+    }
+
+    #[test]
+    fn rejects_overlapping_ruby_ranges_during_stage_validation() {
+        let language = languages::resolve("jpn").expect("Japanese preset");
+        let error = validate_ruby(
+            r#"{"annotations":[{"line_index":1,"text":"かんじ","base":"漢字","base_occurrence":1,"position":"over"},{"line_index":1,"text":"じ","base":"字字幕","base_occurrence":1,"position":"over"}],"unreadable":false}"#,
+            &["漢字字幕".to_owned()],
+            language,
+        )
+        .expect_err("overlapping ruby must fail");
+
+        assert!(error.to_string().contains("overlap"));
     }
 
     #[test]
