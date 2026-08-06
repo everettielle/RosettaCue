@@ -11,26 +11,32 @@ pub(super) fn complete(
 ) -> Result<CompletionResponse, LlmError> {
     let payload = build_payload(config, request);
     let endpoint = http::endpoint(&config.base_url, "chat/completions");
+    http::emit_request(config, "completion", "POST", &endpoint, Some(&payload));
     let response = http::authenticate_bearer(
         client.post(endpoint).json(&payload),
         config.api_key.as_deref(),
     )
     .send()
-    .map_err(http::map_request_error)?;
-    http::parse_response(response, parse_completion_response)
+    .map_err(|error| {
+        http::emit_transport_error(config, "completion", &error);
+        http::map_request_error(error)
+    })?;
+    http::parse_response(response, "completion", parse_completion_response)
 }
 
 pub(super) fn list_models(
     client: &Client,
     config: &ProviderConfig,
 ) -> Result<Vec<LlmModel>, LlmError> {
-    let response = http::authenticate_bearer(
-        client.get(http::endpoint(&config.base_url, "models")),
-        config.api_key.as_deref(),
-    )
-    .send()
-    .map_err(http::map_request_error)?;
-    http::parse_response(response, http::parse_model_list)
+    let endpoint = http::endpoint(&config.base_url, "models");
+    http::emit_request(config, "list_models", "GET", &endpoint, None);
+    let response = http::authenticate_bearer(client.get(endpoint), config.api_key.as_deref())
+        .send()
+        .map_err(|error| {
+            http::emit_transport_error(config, "list_models", &error);
+            http::map_request_error(error)
+        })?;
+    http::parse_response(response, "list_models", http::parse_model_list)
 }
 
 fn build_payload(config: &ProviderConfig, request: &CompletionRequest<'_>) -> Value {

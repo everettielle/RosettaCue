@@ -11,23 +11,29 @@ pub(super) fn complete(
 ) -> Result<CompletionResponse, LlmError> {
     let payload = build_payload(config, request);
     let endpoint = http::endpoint(&config.base_url, "messages");
+    http::emit_request(config, "completion", "POST", &endpoint, Some(&payload));
     let response = authenticate(client.post(endpoint).json(&payload), config)
         .send()
-        .map_err(http::map_request_error)?;
-    http::parse_response(response, parse_completion_response)
+        .map_err(|error| {
+            http::emit_transport_error(config, "completion", &error);
+            http::map_request_error(error)
+        })?;
+    http::parse_response(response, "completion", parse_completion_response)
 }
 
 pub(super) fn list_models(
     client: &Client,
     config: &ProviderConfig,
 ) -> Result<Vec<LlmModel>, LlmError> {
-    let response = authenticate(
-        client.get(http::endpoint(&config.base_url, "models")),
-        config,
-    )
-    .send()
-    .map_err(http::map_request_error)?;
-    http::parse_response(response, http::parse_model_list)
+    let endpoint = http::endpoint(&config.base_url, "models");
+    http::emit_request(config, "list_models", "GET", &endpoint, None);
+    let response = authenticate(client.get(endpoint), config)
+        .send()
+        .map_err(|error| {
+            http::emit_transport_error(config, "list_models", &error);
+            http::map_request_error(error)
+        })?;
+    http::parse_response(response, "list_models", http::parse_model_list)
 }
 
 fn authenticate(request: RequestBuilder, config: &ProviderConfig) -> RequestBuilder {

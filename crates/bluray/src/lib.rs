@@ -8,6 +8,7 @@ use std::sync::{LazyLock, OnceLock};
 
 pub use error::BlurayError;
 use regex::{Captures, Regex};
+use rosettacue_diagnostics::{DiagnosticEvent, DiagnosticLevel};
 use rosettacue_domain::{BlurayDiscInfo, BlurayTitleInfo};
 
 const MEDIA_TOOL_DIRECTORY_ENV: &str = "ROSETTACUE_MEDIA_TOOLS_DIR";
@@ -60,17 +61,64 @@ pub fn configure_media_tools_directory(path: impl Into<PathBuf>) {
 /// Returns an error when the input is not a BDMV backup, `bd_list_titles` is
 /// unavailable, or libbluray returns output that cannot be parsed.
 pub fn inspect_disc(input: impl AsRef<Path>) -> Result<BlurayDiscInfo, BlurayError> {
+    let started = std::time::Instant::now();
     let root = normalize_disc_root(input.as_ref())?;
     let tool = resolve_tool("bd_list_titles").ok_or(BlurayError::ToolNotFound("bd_list_titles"))?;
+    media_event(
+        "inspect_disc",
+        "start",
+        DiagnosticLevel::Info,
+        "Inspecting Blu-ray source.",
+        None,
+        || serde_json::json!({ "tool": tool, "source_path": root, "arguments": ["-l"] }),
+    );
     let output = Command::new(tool).arg(&root).arg("-l").output()?;
     if !output.status.success() {
+        media_event(
+            "inspect_disc",
+            "failed",
+            DiagnosticLevel::Error,
+            "Blu-ray inspection tool failed.",
+            Some(elapsed_ms(started)),
+            || {
+                serde_json::json!({
+                    "status": output.status.code(),
+                    "stdout": String::from_utf8_lossy(&output.stdout),
+                    "stderr": String::from_utf8_lossy(&output.stderr)
+                })
+            },
+        );
         return Err(BlurayError::ToolFailed {
             tool: "bd_list_titles",
             status: output.status.code().unwrap_or(-1),
             message: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
         });
     }
-    parse_title_listing(&String::from_utf8(output.stdout)?, &root)
+    let parsed = parse_title_listing(&String::from_utf8(output.stdout.clone())?, &root);
+    media_event(
+        "inspect_disc",
+        if parsed.is_ok() {
+            "completed"
+        } else {
+            "invalid_output"
+        },
+        if parsed.is_ok() {
+            DiagnosticLevel::Info
+        } else {
+            DiagnosticLevel::Error
+        },
+        "Blu-ray source inspection completed.",
+        Some(elapsed_ms(started)),
+        || {
+            serde_json::json!({
+                "status": output.status.code(),
+                "stdout": String::from_utf8_lossy(&output.stdout),
+                "title_count": parsed.as_ref().map(|disc| disc.titles.len()).ok(),
+                "error": parsed.as_ref().err().map(ToString::to_string)
+            })
+        },
+    );
+    parsed
 }
 
 /// Streams one Blu-ray PGS track into `FFmpeg` and writes an HDMV SUP file.
@@ -79,12 +127,14 @@ pub fn inspect_disc(input: impl AsRef<Path>) -> Result<BlurayDiscInfo, BlurayErr
 ///
 /// Returns an error when the selected stream is invalid, required media tools
 /// are unavailable, or either process fails.
+#[allow(clippy::too_many_lines)]
 pub fn demux_pgs_track(
     disc_root: impl AsRef<Path>,
     title: &BlurayTitleInfo,
     stream_index: u32,
     destination: impl AsRef<Path>,
 ) -> Result<(), BlurayError> {
+    let started = std::time::Instant::now();
     if stream_index >= title.pgs_tracks {
         return Err(BlurayError::InvalidOutput(format!(
             "PGS stream index {stream_index} is outside title {}",
@@ -98,6 +148,23 @@ pub fn demux_pgs_track(
     }
     let bd_splice = resolve_tool("bd_splice").ok_or(BlurayError::ToolNotFound("bd_splice"))?;
     let ffmpeg = resolve_tool("ffmpeg").ok_or(BlurayError::ToolNotFound("ffmpeg"))?;
+    media_event(
+        "demux_pgs_track",
+        "start",
+        DiagnosticLevel::Info,
+        "Starting PGS demux.",
+        None,
+        || {
+            serde_json::json!({
+                "source_path": disc_root,
+                "destination": destination,
+                "title_index": title.index,
+                "stream_index": stream_index,
+                "bd_splice": bd_splice,
+                "ffmpeg": ffmpeg
+            })
+        },
+    );
     let mut splice = Command::new(bd_splice)
         .args(["-t", &title.index.to_string(), "-a", "1"])
         .arg(&disc_root)
@@ -135,9 +202,86 @@ pub fn demux_pgs_track(
         let _ = splice.kill();
     }
     let splice_output = splice.wait_with_output()?;
-    ensure_tool_success("ffmpeg", &ffmpeg_output)?;
-    ensure_tool_success("bd_splice", &splice_output)?;
+    if let Err(error) = ensure_tool_success("ffmpeg", &ffmpeg_output) {
+        media_event(
+            "demux_pgs_track",
+            "failed",
+            DiagnosticLevel::Error,
+            "FFmpeg failed while demuxing PGS.",
+            Some(elapsed_ms(started)),
+            || {
+                serde_json::json!({
+                    "tool": "ffmpeg",
+                    "status": ffmpeg_output.status.code(),
+                    "stdout": String::from_utf8_lossy(&ffmpeg_output.stdout),
+                    "stderr": String::from_utf8_lossy(&ffmpeg_output.stderr),
+                    "error": error.to_string()
+                })
+            },
+        );
+        return Err(error);
+    }
+    if let Err(error) = ensure_tool_success("bd_splice", &splice_output) {
+        media_event(
+            "demux_pgs_track",
+            "failed",
+            DiagnosticLevel::Error,
+            "bd_splice failed while demuxing PGS.",
+            Some(elapsed_ms(started)),
+            || {
+                serde_json::json!({
+                    "tool": "bd_splice",
+                    "status": splice_output.status.code(),
+                    "stderr": String::from_utf8_lossy(&splice_output.stderr),
+                    "error": error.to_string()
+                })
+            },
+        );
+        return Err(error);
+    }
+    media_event(
+        "demux_pgs_track",
+        "completed",
+        DiagnosticLevel::Info,
+        "PGS demux completed.",
+        Some(elapsed_ms(started)),
+        || {
+            serde_json::json!({
+                "destination": destination,
+                "output_bytes": std::fs::metadata(destination).map(|metadata| metadata.len()).ok(),
+                "ffmpeg_status": ffmpeg_output.status.code(),
+                "bd_splice_status": splice_output.status.code()
+            })
+        },
+    );
     Ok(())
+}
+
+fn media_event(
+    operation: &str,
+    phase: &str,
+    level: DiagnosticLevel,
+    message: &str,
+    duration_ms: Option<u64>,
+    details: impl FnOnce() -> serde_json::Value,
+) {
+    if !rosettacue_diagnostics::enabled() {
+        return;
+    }
+    rosettacue_diagnostics::emit(DiagnosticEvent {
+        level,
+        source: "bluray",
+        category: "media",
+        operation,
+        phase,
+        message,
+        duration_ms,
+        details: details(),
+    });
+}
+
+fn elapsed_ms(started: std::time::Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 fn ensure_tool_success(

@@ -18,6 +18,7 @@ import {
   type BackendMethod,
   type WindowMode,
 } from "./contracts"
+import { DiagnosticStore } from "./diagnostics"
 import { RustBackend } from "./rust-backend"
 import * as m from "../src/paraglide/messages.js"
 
@@ -28,10 +29,35 @@ const allowedMethods = new Set<string>(backendMethods)
 const allowedEvents = new Set<string>(backendEvents)
 
 let mainWindow: BrowserWindow | null = null
-const backend = new RustBackend()
+let debugWindow: BrowserWindow | null = null
+let diagnostics: DiagnosticStore | null = null
+const backend = new RustBackend(
+  (entry) => diagnostics?.record(entry),
+  () => diagnostics?.isEnabled() ?? false
+)
 
 const welcomeWindowSize = { width: 960, height: 600 }
 const workspaceWindowSize = { width: 1440, height: 900 }
+
+function recordElectronOperation(
+  operation: string,
+  phase: string,
+  message: string,
+  details: unknown,
+  durationMs: number | null = null
+) {
+  diagnostics?.record({
+    level: phase === "failed" ? "error" : "debug",
+    source: "electron",
+    category: "desktop",
+    operation,
+    phase,
+    message,
+    correlation_id: null,
+    duration_ms: durationMs,
+    details,
+  })
+}
 
 function fitToWorkArea(width: number, height: number) {
   const workArea = screen.getPrimaryDisplay().workAreaSize
@@ -120,6 +146,54 @@ function createWindow() {
   }
 }
 
+function loadRenderer(window: BrowserWindow, view?: string) {
+  if (process.env.VITE_DEV_SERVER_URL) {
+    const url = new URL(process.env.VITE_DEV_SERVER_URL)
+    if (view) url.searchParams.set("view", view)
+    void window.loadURL(url.toString())
+  } else {
+    void window.loadFile(join(rendererDirectory, "index.html"), {
+      query: view ? { view } : undefined,
+    })
+  }
+}
+
+function createDebugWindow() {
+  if (debugWindow && !debugWindow.isDestroyed()) {
+    debugWindow.show()
+    debugWindow.focus()
+    return
+  }
+  debugWindow = new BrowserWindow({
+    title: "RosettaCue Debug Log",
+    width: 1120,
+    height: 760,
+    minWidth: 760,
+    minHeight: 520,
+    show: false,
+    backgroundColor: nativeTheme.shouldUseDarkColors ? "#171717" : "#ffffff",
+    webPreferences: {
+      preload: join(currentDirectory, "preload.mjs"),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      webSecurity: true,
+    },
+  })
+  recordElectronOperation(
+    "debug_window",
+    "opened",
+    "Debug Log window opened.",
+    {}
+  )
+  debugWindow.webContents.setWindowOpenHandler(() => ({ action: "deny" }))
+  debugWindow.once("ready-to-show", () => debugWindow?.show())
+  debugWindow.on("closed", () => {
+    debugWindow = null
+  })
+  loadRenderer(debugWindow, "diagnostics")
+}
+
 function registerIpc() {
   ipcMain.handle(
     "rosettacue:backend:invoke",
@@ -134,6 +208,13 @@ function registerIpc() {
   ipcMain.handle(
     "rosettacue:dialog:directory",
     async (_event, options?: { title?: string; defaultPath?: string }) => {
+      const startedAt = Date.now()
+      recordElectronOperation(
+        "select_directory",
+        "opened",
+        "Directory picker opened.",
+        { options }
+      )
       const dialogOptions: OpenDialogOptions = {
         title: options?.title,
         defaultPath: options?.defaultPath,
@@ -142,11 +223,26 @@ function registerIpc() {
       const result = mainWindow
         ? await dialog.showOpenDialog(mainWindow, dialogOptions)
         : await dialog.showOpenDialog(dialogOptions)
-      return result.canceled ? null : result.filePaths[0]
+      const path = result.canceled ? null : result.filePaths[0]
+      recordElectronOperation(
+        "select_directory",
+        result.canceled ? "canceled" : "completed",
+        "Directory picker closed.",
+        { path },
+        Date.now() - startedAt
+      )
+      return path
     }
   )
 
   ipcMain.handle("rosettacue:dialog:project", async () => {
+    const startedAt = Date.now()
+    recordElectronOperation(
+      "select_project",
+      "opened",
+      "Project picker opened.",
+      {}
+    )
     const dialogOptions: OpenDialogOptions = {
       title: m.electron_open_project(),
       properties: ["openDirectory"],
@@ -155,7 +251,15 @@ function registerIpc() {
     const result = mainWindow
       ? await dialog.showOpenDialog(mainWindow, dialogOptions)
       : await dialog.showOpenDialog(dialogOptions)
-    return result.canceled ? null : result.filePaths[0]
+    const path = result.canceled ? null : result.filePaths[0]
+    recordElectronOperation(
+      "select_project",
+      result.canceled ? "canceled" : "completed",
+      "Project picker closed.",
+      { path },
+      Date.now() - startedAt
+    )
+    return path
   })
 
   ipcMain.handle("rosettacue:window:set-mode", (_event, mode: WindowMode) => {
@@ -163,13 +267,109 @@ function registerIpc() {
       throw new Error(`Window mode is not allowed: ${String(mode)}`)
     }
     setWindowMode(mode)
+    recordElectronOperation(
+      "set_window_mode",
+      "completed",
+      "Main window mode changed.",
+      { mode }
+    )
   })
+
+  ipcMain.handle(
+    "rosettacue:diagnostics:snapshot",
+    (_event, sessionId?: string) => diagnostics?.snapshot(sessionId)
+  )
+  ipcMain.handle(
+    "rosettacue:diagnostics:set-enabled",
+    async (_event, enabled: boolean) => {
+      if (typeof enabled !== "boolean") {
+        throw new Error("Diagnostic state must be a boolean.")
+      }
+      if (enabled) {
+        diagnostics?.setEnabled(true)
+        await backend.invoke("configure_diagnostics", { enabled: true })
+      } else {
+        await backend.invoke("configure_diagnostics", { enabled: false })
+        diagnostics?.setEnabled(false)
+      }
+      return diagnostics?.snapshot()
+    }
+  )
+  ipcMain.handle("rosettacue:diagnostics:clear", () => {
+    diagnostics?.clear()
+  })
+  ipcMain.handle("rosettacue:diagnostics:open-window", () => {
+    createDebugWindow()
+  })
+  ipcMain.handle(
+    "rosettacue:diagnostics:renderer-error",
+    (_event, message: string, details?: unknown) => {
+      diagnostics?.record({
+        level: "error",
+        source: "renderer",
+        category: "runtime",
+        operation: "unhandled_error",
+        phase: "reported",
+        message,
+        correlation_id: null,
+        duration_ms: null,
+        details: details ?? {},
+      })
+    }
+  )
+  ipcMain.handle(
+    "rosettacue:diagnostics:export",
+    async (_event, sessionId?: string) => {
+      if (!diagnostics) return null
+      const options = {
+        title: "Export Debug Log",
+        defaultPath: `rosettacue-debug-${new Date().toISOString().slice(0, 10)}.jsonl`,
+        filters: [{ name: "JSON Lines", extensions: ["jsonl"] }],
+      }
+      const parent = debugWindow ?? mainWindow
+      const result = parent
+        ? await dialog.showSaveDialog(parent, options)
+        : await dialog.showSaveDialog(options)
+      if (result.canceled || !result.filePath) return null
+      diagnostics.exportSession(result.filePath, sessionId)
+      return result.filePath
+    }
+  )
 }
 
 app.whenReady().then(async () => {
+  diagnostics = new DiagnosticStore(app.getPath("userData"))
   registerIpc()
+  diagnostics.on("entry", (entry) => {
+    for (const window of BrowserWindow.getAllWindows()) {
+      window.webContents.send("rosettacue:diagnostics:entry", entry)
+    }
+  })
+  diagnostics.on("enabled-changed", (enabled) => {
+    for (const window of BrowserWindow.getAllWindows()) {
+      window.webContents.send("rosettacue:diagnostics:enabled", enabled)
+    }
+  })
+  diagnostics.on("cleared", () => {
+    for (const window of BrowserWindow.getAllWindows()) {
+      window.webContents.send("rosettacue:diagnostics:cleared")
+    }
+  })
   backend.on("backend-event", (event: BackendEvent, payload: unknown) => {
-    if (allowedEvents.has(event)) {
+    if (event === "diagnostic-log") {
+      diagnostics?.accept(payload)
+    } else if (allowedEvents.has(event)) {
+      diagnostics?.record({
+        level: "debug",
+        source: "backend",
+        category: "event",
+        operation: event,
+        phase: "received",
+        message: `Received backend event ${event}.`,
+        correlation_id: null,
+        duration_ms: null,
+        details: { payload },
+      })
       mainWindow?.webContents.send(`rosettacue:event:${event}`, payload)
     }
   })
@@ -193,4 +393,7 @@ app.on("window-all-closed", () => {
   }
 })
 
-app.on("before-quit", () => backend.stop())
+app.on("before-quit", () => {
+  backend.stop()
+  diagnostics?.close()
+})

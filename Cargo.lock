@@ -1256,6 +1256,7 @@ name = "rosettacue-backend"
 version = "0.1.0"
 dependencies = [
  "rosettacue-core",
+ "rosettacue-diagnostics",
  "rosettacue-domain",
  "serde",
  "serde_json",
@@ -1267,8 +1268,10 @@ name = "rosettacue-bluray"
 version = "0.1.0"
 dependencies = [
  "regex",
+ "rosettacue-diagnostics",
  "rosettacue-domain",
  "serde",
+ "serde_json",
  "tempfile",
  "thiserror",
 ]
@@ -1291,6 +1294,7 @@ name = "rosettacue-core"
 version = "0.1.0"
 dependencies = [
  "rosettacue-bluray",
+ "rosettacue-diagnostics",
  "rosettacue-domain",
  "rosettacue-export",
  "rosettacue-ocr",
@@ -1301,6 +1305,14 @@ dependencies = [
  "serde_json",
  "thiserror",
  "uuid",
+]
+
+[[package]]
+name = "rosettacue-diagnostics"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -1318,6 +1330,7 @@ dependencies = [
 name = "rosettacue-export"
 version = "0.1.0"
 dependencies = [
+ "rosettacue-diagnostics",
  "rosettacue-domain",
  "serde",
  "serde_json",
@@ -1332,6 +1345,7 @@ name = "rosettacue-llm"
 version = "0.1.0"
 dependencies = [
  "reqwest",
+ "rosettacue-diagnostics",
  "serde",
  "serde_json",
  "thiserror",
@@ -1344,6 +1358,7 @@ dependencies = [
  "base64 0.23.0",
  "png",
  "regex",
+ "rosettacue-diagnostics",
  "rosettacue-domain",
  "rosettacue-llm",
  "serde",
@@ -1359,6 +1374,8 @@ name = "rosettacue-pgs"
 version = "0.1.0"
 dependencies = [
  "png",
+ "rosettacue-diagnostics",
+ "serde_json",
  "sha2",
  "tempfile",
  "thiserror",
@@ -1368,6 +1385,7 @@ dependencies = [
 name = "rosettacue-project"
 version = "0.1.0"
 dependencies = [
+ "rosettacue-diagnostics",
  "rosettacue-domain",
  "rusqlite",
  "serde_json",
@@ -1381,6 +1399,7 @@ dependencies = [
 name = "rosettacue-translation"
 version = "0.1.0"
 dependencies = [
+ "rosettacue-diagnostics",
  "rosettacue-domain",
  "rosettacue-llm",
  "serde",

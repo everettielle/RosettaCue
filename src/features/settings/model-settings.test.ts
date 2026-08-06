@@ -29,7 +29,6 @@ describe("workspace model settings persistence", () => {
     settings.profiles.validation.model = "validator-local"
     settings.profiles.translation.model = "claude-opus-4-6"
     settings.profiles.translation.api_key = "session-secret"
-    settings.debug_logging = true
 
     saveWorkspaceSettings(settings)
     const restored = loadWorkspaceSettings()
@@ -38,7 +37,6 @@ describe("workspace model settings persistence", () => {
     expect(restored.profiles.validation.model).toBe("validator-local")
     expect(restored.profiles.translation.model).toBe("claude-opus-4-6")
     expect(restored.profiles.translation.api_key).toBeNull()
-    expect(restored.debug_logging).toBe(true)
     expect([...storage.values()].join("\n")).not.toContain("session-secret")
   })
 })

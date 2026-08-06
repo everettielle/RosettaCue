@@ -55,7 +55,6 @@ import type {
   ExportOptions,
   ExportResult,
   OcrDocument,
-  OcrDebugLogEntry,
   OcrJobResult,
   OcrLine,
   OcrProgress,
@@ -75,7 +74,6 @@ import {
   validateProviderConfig,
   type WorkspaceSettings,
 } from "@/features/settings/model-settings"
-import { DebugLogDialog } from "@/features/settings/debug-log-dialog"
 import { SettingsDialog } from "@/features/settings/settings-dialog"
 import { RevisionHistoryDialog } from "@/features/workspace/revision-history-dialog"
 import {
@@ -411,8 +409,8 @@ export function ProjectWorkspace({
     loadWorkspaceSettings
   )
   const [settingsOpen, setSettingsOpen] = React.useState(false)
-  const [debugLogOpen, setDebugLogOpen] = React.useState(false)
-  const [debugLogs, setDebugLogs] = React.useState<OcrDebugLogEntry[]>([])
+  const [debugLoggingEnabled, setDebugLoggingEnabled] = React.useState(false)
+  const [debugLogCount, setDebugLogCount] = React.useState(0)
   const [saveAsOpen, setSaveAsOpen] = React.useState(false)
   const [sourceImportOpen, setSourceImportOpen] = React.useState(false)
   const [pgsOpen, setPgsOpen] = React.useState(false)
@@ -645,18 +643,35 @@ export function ProjectWorkspace({
         }
       }
     )
-    const removeDebugListener = desktop.on<OcrDebugLogEntry>(
-      "debug-log",
-      (entry) => {
-        setDebugLogs((current) => [...current.slice(-199), entry])
-      }
-    )
     return () => {
       removePgsListener()
       removeOcrListener()
       removeControlListener()
       removeTranslationListener()
-      removeDebugListener()
+    }
+  }, [])
+
+  React.useEffect(() => {
+    let active = true
+    void desktop.diagnostics.snapshot().then((snapshot) => {
+      if (!active) return
+      setDebugLoggingEnabled(snapshot.enabled)
+      setDebugLogCount(snapshot.entries.length)
+    })
+    const removeEntryListener = desktop.diagnostics.onEntry(() => {
+      setDebugLogCount((current) => current + 1)
+    })
+    const removeEnabledListener = desktop.diagnostics.onEnabledChange(
+      (enabled) => setDebugLoggingEnabled(enabled)
+    )
+    const removeClearedListener = desktop.diagnostics.onCleared(() => {
+      setDebugLogCount(0)
+    })
+    return () => {
+      active = false
+      removeEntryListener()
+      removeEnabledListener()
+      removeClearedListener()
     }
   }, [])
 
@@ -831,7 +846,6 @@ export function ProjectWorkspace({
         config: {
           recognition: settings.profiles.ocr,
           validation: settings.profiles.validation,
-          debug_logging: settings.debug_logging,
         },
       })
       onProjectChange(result.project)
@@ -1402,11 +1416,14 @@ export function ProjectWorkspace({
       <SettingsDialog
         open={settingsOpen}
         settings={settings}
-        debugLogCount={debugLogs.length}
+        debugLoggingEnabled={debugLoggingEnabled}
+        debugLogCount={debugLogCount}
         onOpenChange={setSettingsOpen}
-        onOpenDebugLog={() => {
-          setSettingsOpen(false)
-          setDebugLogOpen(true)
+        onOpenDebugLog={() => void desktop.diagnostics.openWindow()}
+        onDebugLoggingChange={async (enabled) => {
+          const snapshot = await desktop.diagnostics.setEnabled(enabled)
+          setDebugLoggingEnabled(snapshot.enabled)
+          setDebugLogCount(snapshot.entries.length)
         }}
         onSave={(next) => {
           setSettings(next)
@@ -1414,15 +1431,6 @@ export function ProjectWorkspace({
           setError(null)
           setStatusMessage(m.status_settings_saved())
         }}
-      />
-      <DebugLogDialog
-        open={debugLogOpen}
-        entries={debugLogs}
-        onOpenChange={(open) => {
-          setDebugLogOpen(open)
-          if (!open) setSettingsOpen(true)
-        }}
-        onClear={() => setDebugLogs([])}
       />
       <RevisionHistoryDialog
         open={revisionHistoryOpen}

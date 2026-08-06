@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 rosettacue-core = { path = "../../crates/core" }
+rosettacue-diagnostics = { path = "../../crates/diagnostics" }
 rosettacue-domain = { path = "../../crates/domain" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"

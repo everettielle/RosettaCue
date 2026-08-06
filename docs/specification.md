@@ -323,6 +323,7 @@ Request IDs permit concurrent out-of-order completion. A single Rust writer thre
 | `translate_cues`         | projectPath, Cue IDs, target language, overwrite, profile | job result                  | Yes                          |
 | `project_jobs`           | projectPath                                               | durable job list            | Recovery normalization       |
 | `cancel_project_job`     | projectPath, jobId                                        | job                         | Yes                          |
+| `configure_diagnostics`  | enabled                                                   | none                        | App preference              |
 | `resume_ocr_job`         | projectPath, jobId, pipeline                              | job result                  | Yes                          |
 | `resume_translation_job` | projectPath, jobId, profile                               | job result                  | Yes                          |
 | `pause_ocr`              | none                                                      | unit                        | In-memory controller         |
@@ -1020,6 +1021,7 @@ Settings uses a left-section layout:
 - **General:** theme and media-tool diagnostics.
 - **Project:** OCR language and translation target language.
 - **Models:** independent Phase 1 OCR, Phase 2 validation/style, and post-OCR translation profiles with task-specific capability descriptions.
+- **Advanced:** application-wide debug logging and the independent Debug Log window.
 
 Supported providers are LM Studio, Ollama, OpenAI API, and Anthropic API. A profile contains provider, base URL, model, optional session API key, timeout, token limit, and attempt count. API keys remain only in renderer memory and are redacted from local preferences and project records.
 
@@ -1143,6 +1145,19 @@ LM Studio, Ollama, and OpenAI use an OpenAI-compatible request shape where appli
 ### 13.3 Log hygiene
 
 Protocol standard output must never contain free-form logging. Provider configuration is redacted before durable persistence. Error messages must not concatenate API keys or authorization headers.
+
+When the user explicitly enables debug logging, structured entries cover
+Electron IPC, Rust RPC dispatch, media subprocesses, PGS decoding, project
+transactions, user data mutations, OCR/translation stages, exports, and LLM
+HTTP exchanges. Electron stores them as rotating session JSONL files outside
+project packages and exposes them through a separate resizable viewer.
+
+Provider diagnostics preserve the complete response body before normalized
+content extraction, together with HTTP status and safe headers. API keys,
+authorization headers, cookies, base64 images, and binary payloads remain
+redacted. Because project text, file paths, prompts, and provider responses may
+be present, the UI warns that debug logging can expose local project data,
+increase disk use, and reduce performance.
 
 ## 14. Export specification
 

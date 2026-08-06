@@ -29,6 +29,7 @@ export const backendMethods = [
   "pause_ocr",
   "resume_ocr",
   "stop_ocr",
+  "configure_diagnostics",
 ] as const
 
 export type BackendMethod = (typeof backendMethods)[number]
@@ -38,7 +39,7 @@ export const backendEvents = [
   "ocr-progress",
   "ocr-control-state",
   "translation-progress",
-  "debug-log",
+  "diagnostic-log",
 ] as const
 
 export type BackendEvent = (typeof backendEvents)[number]
@@ -46,3 +47,29 @@ export type BackendEvent = (typeof backendEvents)[number]
 export const windowModes = ["welcome", "workspace"] as const
 
 export type WindowMode = (typeof windowModes)[number]
+
+export type DiagnosticLevel = "debug" | "info" | "warn" | "error"
+
+export type DiagnosticEntry = {
+  id: string
+  session_id: string
+  sequence: number
+  created_at_ms: number
+  level: DiagnosticLevel
+  source: string
+  category: string
+  operation: string
+  phase: string
+  message: string
+  correlation_id: string | null
+  duration_ms: number | null
+  details: unknown
+}
+
+export type DiagnosticSnapshot = {
+  enabled: boolean
+  session_id: string
+  current_session_id: string
+  sessions: string[]
+  entries: DiagnosticEntry[]
+}

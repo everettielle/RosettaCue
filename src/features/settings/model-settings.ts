@@ -8,7 +8,6 @@ export type ModelTask = "ocr" | "validation" | "translation"
 export type WorkspaceSettings = {
   ocr_language: string
   target_language: string
-  debug_logging: boolean
   profiles: Record<ModelTask, ProviderConfig>
 }
 
@@ -34,7 +33,6 @@ export function providerDefaults(provider: LlmProvider): ProviderConfig {
 export const defaultWorkspaceSettings: WorkspaceSettings = {
   ocr_language: "jpn",
   target_language: "kor",
-  debug_logging: false,
   profiles: {
     ocr: providerDefaults("lm_studio"),
     validation: providerDefaults("lm_studio"),
@@ -70,8 +68,6 @@ export function loadWorkspaceSettings(): WorkspaceSettings {
           stored.ocr_language ?? defaultWorkspaceSettings.ocr_language,
         target_language:
           stored.target_language ?? defaultWorkspaceSettings.target_language,
-        debug_logging:
-          stored.debug_logging ?? defaultWorkspaceSettings.debug_logging,
         profiles: {
           ocr: mergeProfile(
             stored.profiles.ocr,

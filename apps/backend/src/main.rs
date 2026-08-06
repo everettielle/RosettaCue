@@ -5,6 +5,7 @@ use rosettacue_core::{
     Application, ExportOptions, LlmProvider, LmStudioConfig, OcrPipelineConfig, ProviderConfig,
     configure_media_tools_directory,
 };
+use rosettacue_diagnostics::{DiagnosticEvent, DiagnosticLevel};
 use rosettacue_domain::{CueEditDocument, ReviewStatus};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -283,6 +284,11 @@ struct ResumeTranslationParams {
     config: ProviderConfig,
 }
 
+#[derive(Debug, Deserialize)]
+struct ConfigureDiagnosticsParams {
+    enabled: bool,
+}
+
 type MessageSender = mpsc::Sender<Value>;
 
 fn main() {
@@ -292,6 +298,13 @@ fn main() {
 
     let (sender, receiver) = mpsc::channel::<Value>();
     std::thread::spawn(move || write_messages(receiver));
+    let diagnostic_sender = sender.clone();
+    let _ = rosettacue_diagnostics::set_sink(std::sync::Arc::new(move |entry| {
+        emit(&diagnostic_sender, "diagnostic-log", entry);
+    }));
+    rosettacue_diagnostics::configure(
+        std::env::var("ROSETTACUE_DEBUG_LOGGING").is_ok_and(|value| value == "1"),
+    );
     let controller = OcrJobController::default();
     let stdin = std::io::stdin();
 
@@ -318,31 +331,75 @@ fn main() {
         let request_sender = sender.clone();
         let request_controller = controller.clone();
         std::thread::spawn(move || {
-            let id = request.id;
-            let result = dispatch(
-                &request.method,
-                request.params,
-                &request_sender,
-                &request_controller,
-            );
-            let response = match result {
-                Ok(result) => RpcResponse {
-                    id,
-                    result: Some(result),
-                    error: None,
-                },
-                Err(message) => RpcResponse {
-                    id,
-                    result: None,
-                    error: Some(RpcError {
-                        code: "backend_error",
-                        message,
-                    }),
-                },
-            };
-            send_serializable(&request_sender, &response);
+            handle_request(request, &request_sender, &request_controller);
         });
     }
+}
+
+fn handle_request(request: RpcRequest, sender: &MessageSender, controller: &OcrJobController) {
+    let id = request.id;
+    let correlation_id = id.clone();
+    let method = request.method;
+    let started = std::time::Instant::now();
+    let result = rosettacue_diagnostics::with_correlation(correlation_id, || {
+        if rosettacue_diagnostics::enabled() {
+            rosettacue_diagnostics::emit(DiagnosticEvent {
+                level: DiagnosticLevel::Debug,
+                source: "backend",
+                category: "rpc",
+                operation: &method,
+                phase: "dispatch",
+                message: "Dispatching backend request.",
+                duration_ms: None,
+                details: json!({}),
+            });
+        }
+        let result = dispatch(&method, request.params, sender, controller);
+        if rosettacue_diagnostics::enabled() {
+            rosettacue_diagnostics::emit(DiagnosticEvent {
+                level: if result.is_ok() {
+                    DiagnosticLevel::Debug
+                } else {
+                    DiagnosticLevel::Error
+                },
+                source: "backend",
+                category: "rpc",
+                operation: &method,
+                phase: if result.is_ok() {
+                    "completed"
+                } else {
+                    "failed"
+                },
+                message: if result.is_ok() {
+                    "Backend request completed."
+                } else {
+                    "Backend request failed."
+                },
+                duration_ms: Some(u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)),
+                details: result
+                    .as_ref()
+                    .err()
+                    .map_or_else(|| json!({}), |error| json!({ "error": error })),
+            });
+        }
+        result
+    });
+    let response = match result {
+        Ok(result) => RpcResponse {
+            id,
+            result: Some(result),
+            error: None,
+        },
+        Err(message) => RpcResponse {
+            id,
+            result: None,
+            error: Some(RpcError {
+                code: "backend_error",
+                message,
+            }),
+        },
+    };
+    send_serializable(sender, &response);
 }
 
 #[allow(clippy::too_many_lines)]
@@ -471,7 +528,6 @@ fn dispatch(
             let params: RecognizeLmStudioParams = parse(value)?;
             controller.start()?;
             let event_sender = sender.clone();
-            let debug_sender = sender.clone();
             let paused_sender = sender.clone();
             let result = app.recognize_lmstudio(
                 params.project_path,
@@ -485,7 +541,6 @@ fn dispatch(
                     })
                 },
                 move |progress| emit(&event_sender, "ocr-progress", progress),
-                move |entry| emit(&debug_sender, "debug-log", entry),
             );
             controller.finish();
             serialize_result(result)
@@ -494,7 +549,6 @@ fn dispatch(
             let params: RecognizeOcrParams = parse(value)?;
             controller.start()?;
             let event_sender = sender.clone();
-            let debug_sender = sender.clone();
             let paused_sender = sender.clone();
             let result = app.recognize_ocr(
                 params.project_path,
@@ -508,7 +562,6 @@ fn dispatch(
                     })
                 },
                 move |progress| emit(&event_sender, "ocr-progress", progress),
-                move |entry| emit(&debug_sender, "debug-log", entry),
             );
             controller.finish();
             serialize_result(result)
@@ -538,7 +591,6 @@ fn dispatch(
             let params: ResumeOcrParams = parse(value)?;
             controller.start()?;
             let event_sender = sender.clone();
-            let debug_sender = sender.clone();
             let paused_sender = sender.clone();
             let result = app.resume_ocr_job(
                 params.project_path,
@@ -550,7 +602,6 @@ fn dispatch(
                     })
                 },
                 move |progress| emit(&event_sender, "ocr-progress", progress),
-                move |entry| emit(&debug_sender, "debug-log", entry),
             );
             controller.finish();
             serialize_result(result)
@@ -576,6 +627,23 @@ fn dispatch(
         }
         "stop_ocr" => {
             controller.stop()?;
+            serialize(())
+        }
+        "configure_diagnostics" => {
+            let params: ConfigureDiagnosticsParams = parse(value)?;
+            rosettacue_diagnostics::configure(params.enabled);
+            if params.enabled {
+                rosettacue_diagnostics::emit(DiagnosticEvent {
+                    level: DiagnosticLevel::Info,
+                    source: "backend",
+                    category: "diagnostics",
+                    operation: "configure",
+                    phase: "enabled",
+                    message: "Backend debug logging enabled.",
+                    duration_ms: None,
+                    details: json!({}),
+                });
+            }
             serialize(())
         }
         _ => Err(format!("unknown backend method: {method}")),

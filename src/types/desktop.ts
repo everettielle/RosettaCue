@@ -29,15 +29,42 @@ export type BackendMethod =
   | "pause_ocr"
   | "resume_ocr"
   | "stop_ocr"
+  | "configure_diagnostics"
 
 export type BackendEvent =
   | "pgs-extraction-progress"
   | "ocr-progress"
   | "ocr-control-state"
   | "translation-progress"
-  | "debug-log"
+  | "diagnostic-log"
 
 export type WindowMode = "welcome" | "workspace"
+
+export type DiagnosticLevel = "debug" | "info" | "warn" | "error"
+
+export type DiagnosticEntry = {
+  id: string
+  session_id: string
+  sequence: number
+  created_at_ms: number
+  level: DiagnosticLevel
+  source: string
+  category: string
+  operation: string
+  phase: string
+  message: string
+  correlation_id: string | null
+  duration_ms: number | null
+  details: unknown
+}
+
+export type DiagnosticSnapshot = {
+  enabled: boolean
+  session_id: string
+  current_session_id: string
+  sessions: string[]
+  entries: DiagnosticEntry[]
+}
 
 export type RosettaCueDesktopApi = {
   platform: string
@@ -52,6 +79,17 @@ export type RosettaCueDesktopApi = {
   }
   window: {
     setMode(mode: WindowMode): Promise<void>
+  }
+  diagnostics: {
+    snapshot(sessionId?: string): Promise<DiagnosticSnapshot>
+    setEnabled(enabled: boolean): Promise<DiagnosticSnapshot>
+    clear(): Promise<void>
+    openWindow(): Promise<void>
+    reportRendererError(message: string, details?: unknown): Promise<void>
+    exportCurrent(sessionId?: string): Promise<string | null>
+    onEntry(listener: (entry: DiagnosticEntry) => void): () => void
+    onEnabledChange(listener: (enabled: boolean) => void): () => void
+    onCleared(listener: () => void): () => void
   }
 }
 

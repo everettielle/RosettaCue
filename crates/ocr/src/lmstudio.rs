@@ -1,9 +1,9 @@
 use std::collections::{BTreeMap, HashMap};
-use std::fmt::Display;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
+use rosettacue_diagnostics::{DiagnosticEvent, DiagnosticLevel};
 use rosettacue_domain::{
     NormalizationRecord, OcrDocument, OcrLine, OcrSpan, RubyAnnotation, RubyPosition, TextStyle,
 };
@@ -27,8 +27,6 @@ pub type LmStudioBackend = ProviderOcrBackend;
 pub struct OcrPipelineConfig {
     pub recognition: ProviderConfig,
     pub validation: ProviderConfig,
-    #[serde(default)]
-    pub debug_logging: bool,
 }
 
 impl OcrPipelineConfig {
@@ -37,7 +35,6 @@ impl OcrPipelineConfig {
         Self {
             recognition: config.clone(),
             validation: config,
-            debug_logging: false,
         }
     }
 
@@ -46,7 +43,6 @@ impl OcrPipelineConfig {
         Self {
             recognition: self.recognition.redacted(),
             validation: self.validation.redacted(),
-            debug_logging: self.debug_logging,
         }
     }
 }
@@ -61,59 +57,6 @@ pub struct ProviderOcrBackend {
     config: OcrPipelineConfig,
     recognition_client: ProviderClient,
     validation_client: ProviderClient,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum OcrDebugStatus {
-    Succeeded,
-    ValidationFailed,
-    ProviderFailed,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OcrDebugLogEntry {
-    pub created_at_ms: u64,
-    pub cue_id: uuid::Uuid,
-    pub cue_index: u32,
-    pub stage: String,
-    pub attempt: u32,
-    pub provider: String,
-    pub model: String,
-    pub status: OcrDebugStatus,
-    pub raw_response: Option<String>,
-    pub error: Option<String>,
-}
-
-struct DebugReporter<'a, F> {
-    enabled: bool,
-    request: &'a OcrRequest,
-    callback: &'a mut F,
-}
-
-impl<F: FnMut(OcrDebugLogEntry)> DebugReporter<'_, F> {
-    fn report(
-        &mut self,
-        client: &ProviderClient,
-        stage: &str,
-        attempt: u32,
-        status: OcrDebugStatus,
-        raw_response: Option<&str>,
-        error: Option<&dyn Display>,
-    ) {
-        if !self.enabled {
-            return;
-        }
-        (self.callback)(debug_log_entry(
-            self.request,
-            client,
-            stage,
-            attempt,
-            status,
-            raw_response.map(str::to_owned),
-            error.map(ToString::to_string),
-        ));
-    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -177,13 +120,13 @@ impl ProviderOcrBackend {
         })
     }
 
-    fn run_stage<T, F: FnMut(OcrDebugLogEntry)>(
+    fn run_stage<T>(
         client: &ProviderClient,
         image_url: &str,
         stage: &'static str,
         user_text: &str,
         schema: &Value,
-        debug: &mut DebugReporter<'_, F>,
+        request: &OcrRequest,
         validate: impl Fn(&str) -> Result<T, OcrError>,
     ) -> Result<(T, CompletionResponse, u32), OcrError> {
         let mut previous: Option<String> = None;
@@ -202,49 +145,57 @@ impl ProviderOcrBackend {
             }) {
                 Ok(response) => response,
                 Err(error) => {
-                    debug.report(
+                    emit_stage_event(
+                        request,
                         client,
                         stage,
                         attempt,
-                        OcrDebugStatus::ProviderFailed,
+                        DiagnosticLevel::Error,
+                        "provider_failed",
                         None,
-                        Some(&error),
+                        Some(&error.to_string()),
                     );
                     return Err(error.into());
                 }
             };
             match validate(&response.content) {
                 Ok(value) => {
-                    debug.report(
+                    emit_stage_event(
+                        request,
                         client,
                         stage,
                         attempt,
-                        OcrDebugStatus::Succeeded,
+                        DiagnosticLevel::Debug,
+                        "succeeded",
                         Some(&response.content),
                         None,
                     );
                     return Ok((value, response, attempt));
                 }
                 Err(error) if attempt < client.config().max_attempts => {
-                    debug.report(
+                    emit_stage_event(
+                        request,
                         client,
                         stage,
                         attempt,
-                        OcrDebugStatus::ValidationFailed,
+                        DiagnosticLevel::Warn,
+                        "validation_failed",
                         Some(&response.content),
-                        Some(&error),
+                        Some(&error.to_string()),
                     );
                     validation_error = Some(error.to_string());
                     previous = Some(response.content);
                 }
                 Err(error) => {
-                    debug.report(
+                    emit_stage_event(
+                        request,
                         client,
                         stage,
                         attempt,
-                        OcrDebugStatus::ValidationFailed,
+                        DiagnosticLevel::Error,
+                        "validation_failed",
                         Some(&response.content),
-                        Some(&error),
+                        Some(&error.to_string()),
                     );
                     return Err(error);
                 }
@@ -255,42 +206,19 @@ impl ProviderOcrBackend {
         )))
     }
 
-    /// Recognizes one cue while reporting opt-in provider responses and validation failures.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the image cannot be read, the provider is unavailable, or a stage
-    /// response fails deterministic validation.
-    pub fn recognize_with_debug(
-        &self,
-        request: &OcrRequest,
-        mut debug: impl FnMut(OcrDebugLogEntry),
-    ) -> Result<OcrRecognition, OcrError> {
-        self.recognize_inner(request, &mut debug)
-    }
-
-    fn recognize_inner(
-        &self,
-        request: &OcrRequest,
-        debug: &mut impl FnMut(OcrDebugLogEntry),
-    ) -> Result<OcrRecognition, OcrError> {
+    fn recognize_inner(&self, request: &OcrRequest) -> Result<OcrRecognition, OcrError> {
         let language = languages::resolve(&request.language)?;
         let started = Instant::now();
         let image = std::fs::read(&request.image_path)?;
         let expected_main_rows = estimate_main_rows(&image);
         let image_base64 = BASE64.encode(image);
-        let mut debug = DebugReporter {
-            enabled: self.config.debug_logging,
-            request,
-            callback: debug,
-        };
         let (recognition, recognition_response, _) = Self::run_stage(
             &self.recognition_client,
             &image_base64,
             "recognition",
             &prompt::recognition(language, expected_main_rows),
             &recognition_schema(),
-            &mut debug,
+            request,
             |content| validate_recognition(content, expected_main_rows, language),
         )?;
         let main_lines = recognition
@@ -308,7 +236,7 @@ impl ProviderOcrBackend {
             "style",
             &prompt::whole_cue_style(language, &main_lines),
             &style_schema(),
-            &mut debug,
+            request,
             validate_whole_cue_style,
         )?;
         let unreadable = recognition.unreadable;
@@ -359,36 +287,42 @@ impl OcrBackend for ProviderOcrBackend {
     }
 
     fn recognize(&self, request: &OcrRequest) -> Result<OcrRecognition, OcrError> {
-        self.recognize_inner(request, &mut |_| {})
+        self.recognize_inner(request)
     }
 }
 
-fn debug_log_entry(
+#[allow(clippy::too_many_arguments)]
+fn emit_stage_event(
     request: &OcrRequest,
     client: &ProviderClient,
     stage: &str,
     attempt: u32,
-    status: OcrDebugStatus,
-    raw_response: Option<String>,
-    error: Option<String>,
-) -> OcrDebugLogEntry {
-    let created_at_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| {
-            u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
-        });
-    OcrDebugLogEntry {
-        created_at_ms,
-        cue_id: request.cue_id,
-        cue_index: request.cue_index,
-        stage: stage.to_owned(),
-        attempt,
-        provider: client.config().provider.as_str().to_owned(),
-        model: client.config().model.clone(),
-        status,
-        raw_response,
-        error,
+    level: DiagnosticLevel,
+    phase: &str,
+    candidate_content: Option<&str>,
+    error: Option<&str>,
+) {
+    if !rosettacue_diagnostics::enabled() {
+        return;
     }
+    rosettacue_diagnostics::emit(DiagnosticEvent {
+        level,
+        source: "ocr",
+        category: "pipeline",
+        operation: stage,
+        phase,
+        message: "OCR pipeline stage completed an attempt.",
+        duration_ms: None,
+        details: json!({
+            "cue_id": request.cue_id,
+            "cue_index": request.cue_index,
+            "attempt": attempt,
+            "provider": client.config().provider.as_str(),
+            "model": client.config().model,
+            "candidate_content": candidate_content,
+            "error": error
+        }),
+    });
 }
 
 /// Lists models exposed through LM Studio's OpenAI-compatible endpoint.
@@ -682,15 +616,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn legacy_pipeline_config_defaults_debug_logging_to_off() {
+    fn legacy_pipeline_config_ignores_debug_logging() {
         let provider = ProviderConfig::default();
         let config: OcrPipelineConfig = serde_json::from_value(json!({
             "recognition": provider.clone(),
             "validation": provider,
+            "debug_logging": true,
         }))
         .expect("legacy OCR pipeline config");
 
-        assert!(!config.debug_logging);
+        assert!(config.recognition.model.is_empty());
     }
 
     #[test]

@@ -169,6 +169,9 @@ impl ProviderClient {
     /// Returns an error when the configuration or HTTP client is invalid.
     pub fn new(config: ProviderConfig) -> Result<Self, LlmError> {
         config.validate()?;
+        if let Some(api_key) = config.api_key.as_deref() {
+            rosettacue_diagnostics::register_secret(api_key);
+        }
         let client = Client::builder()
             .timeout(Duration::from_secs(config.timeout_seconds))
             .build()?;
@@ -211,6 +214,9 @@ pub fn list_models(
             "{} requires an API key",
             provider.as_str()
         )));
+    }
+    if let Some(api_key) = api_key {
+        rosettacue_diagnostics::register_secret(api_key);
     }
     let config = ProviderConfig {
         provider,

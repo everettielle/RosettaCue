@@ -182,7 +182,8 @@ The renderer can only:
 - request a project or directory through a native Electron dialog.
 
 Electron and Rust talk over newline-delimited JSON on stdin/stdout. Standard
-output is protocol-only; diagnostics go to stderr. Request IDs allow concurrent
+output is protocol-only; structured diagnostic entries use the same event
+envelope instead of writing free-form text. Request IDs allow concurrent
 out-of-order completion, and a single Rust writer thread serializes every
 response and event so JSON can never interleave.
 
@@ -191,6 +192,20 @@ response and event so JSON can never interleave.
 { "id": "a1", "result": { "name": "RosettaCue Core", "version": "0.1.0" } }
 { "event": "ocr-progress", "payload": { "phase": "cue-complete", "current": 8, "total": 1644 } }
 ```
+
+### Debug logging
+
+Settings → Advanced can enable application-wide debug logging. When enabled,
+Electron records IPC, backend lifecycle, project mutations, media extraction,
+OCR and translation stages, and provider HTTP exchanges in rotating session
+JSONL files under the application data directory. The Debug Log opens in a
+separate resizable window so it can remain visible while reproducing a problem.
+
+Provider response entries retain the HTTP status, safe response headers, and
+the complete response body before content parsing. API keys, authorization
+headers, cookies, image base64, and binary payloads are always redacted. Logs
+may still contain project text, local paths, and model responses, and enabling
+them can reduce performance and increase disk usage.
 
 You can drive the sidecar by hand — it is just a line protocol:
 

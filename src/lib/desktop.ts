@@ -20,6 +20,29 @@ const browserFallback: RosettaCueDesktopApi = {
   window: {
     setMode: async () => undefined,
   },
+  diagnostics: {
+    snapshot: async () => ({
+      enabled: false,
+      session_id: "",
+      current_session_id: "",
+      sessions: [],
+      entries: [],
+    }),
+    setEnabled: async (enabled) => ({
+      enabled,
+      session_id: "",
+      current_session_id: "",
+      sessions: [],
+      entries: [],
+    }),
+    clear: async () => undefined,
+    openWindow: async () => undefined,
+    reportRendererError: async () => undefined,
+    exportCurrent: async () => null,
+    onEntry: () => () => undefined,
+    onEnabledChange: () => () => undefined,
+    onCleared: () => () => undefined,
+  },
 }
 
 const bridge = window.rosettaCue ?? browserFallback
@@ -35,4 +58,5 @@ export const desktop = {
   },
   dialogs: bridge.dialogs,
   window: bridge.window,
+  diagnostics: bridge.diagnostics,
 }

@@ -4,6 +4,7 @@ members = [
   "apps/cli",
   "crates/bluray",
   "crates/core",
+  "crates/diagnostics",
   "crates/domain",
   "crates/export",
   "crates/llm",

@@ -49,4 +49,48 @@ contextBridge.exposeInMainWorld("rosettaCue", {
       return ipcRenderer.invoke("rosettacue:window:set-mode", mode)
     },
   },
+  diagnostics: {
+    snapshot(sessionId?: string) {
+      return ipcRenderer.invoke("rosettacue:diagnostics:snapshot", sessionId)
+    },
+    setEnabled(enabled: boolean) {
+      return ipcRenderer.invoke("rosettacue:diagnostics:set-enabled", enabled)
+    },
+    clear() {
+      return ipcRenderer.invoke("rosettacue:diagnostics:clear")
+    },
+    openWindow() {
+      return ipcRenderer.invoke("rosettacue:diagnostics:open-window")
+    },
+    reportRendererError(message: string, details?: unknown) {
+      return ipcRenderer.invoke(
+        "rosettacue:diagnostics:renderer-error",
+        message,
+        details
+      )
+    },
+    exportCurrent(sessionId?: string) {
+      return ipcRenderer.invoke("rosettacue:diagnostics:export", sessionId)
+    },
+    onEntry(listener: (payload: unknown) => void) {
+      const channel = "rosettacue:diagnostics:entry"
+      const wrapped = (_event: Electron.IpcRendererEvent, payload: unknown) =>
+        listener(payload)
+      ipcRenderer.on(channel, wrapped)
+      return () => ipcRenderer.removeListener(channel, wrapped)
+    },
+    onEnabledChange(listener: (enabled: boolean) => void) {
+      const channel = "rosettacue:diagnostics:enabled"
+      const wrapped = (_event: Electron.IpcRendererEvent, enabled: boolean) =>
+        listener(enabled)
+      ipcRenderer.on(channel, wrapped)
+      return () => ipcRenderer.removeListener(channel, wrapped)
+    },
+    onCleared(listener: () => void) {
+      const channel = "rosettacue:diagnostics:cleared"
+      const wrapped = () => listener()
+      ipcRenderer.on(channel, wrapped)
+      return () => ipcRenderer.removeListener(channel, wrapped)
+    },
+  },
 })

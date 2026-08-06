@@ -144,16 +144,20 @@ function mediaToolOriginLabel(origin: MediaToolDiagnostic["origin"]) {
 export function SettingsDialog({
   open,
   settings,
+  debugLoggingEnabled,
   debugLogCount,
   onOpenChange,
   onOpenDebugLog,
+  onDebugLoggingChange,
   onSave,
 }: {
   open: boolean
   settings: WorkspaceSettings
+  debugLoggingEnabled: boolean
   debugLogCount: number
   onOpenChange: (open: boolean) => void
   onOpenDebugLog: () => void
+  onDebugLoggingChange: (enabled: boolean) => Promise<void>
   onSave: (settings: WorkspaceSettings) => void
 }) {
   const { theme, setTheme } = useTheme()
@@ -169,6 +173,7 @@ export function SettingsDialog({
   )
   const [mediaTools, setMediaTools] = React.useState<MediaToolDiagnostic[]>([])
   const [busy, setBusy] = React.useState(false)
+  const [diagnosticsBusy, setDiagnosticsBusy] = React.useState(false)
   const [error, setError] = React.useState<string | null>(null)
 
   React.useEffect(() => {
@@ -270,6 +275,18 @@ export function SettingsDialog({
       setError(reason instanceof Error ? reason.message : String(reason))
     } finally {
       setBusy(false)
+    }
+  }
+
+  const changeDebugLogging = async (enabled: boolean) => {
+    setDiagnosticsBusy(true)
+    setError(null)
+    try {
+      await onDebugLoggingChange(enabled)
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason))
+    } finally {
+      setDiagnosticsBusy(false)
     }
   }
 
@@ -602,12 +619,10 @@ export function SettingsDialog({
                   </FieldContent>
                   <Switch
                     id="debug-logging"
-                    checked={draft.debug_logging}
+                    checked={debugLoggingEnabled}
+                    disabled={diagnosticsBusy}
                     onCheckedChange={(checked) =>
-                      setDraft((current) => ({
-                        ...current,
-                        debug_logging: checked,
-                      }))
+                      void changeDebugLogging(checked)
                     }
                   />
                 </Field>

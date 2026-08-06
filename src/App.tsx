@@ -52,6 +52,30 @@ function App() {
     }
   }, [])
 
+  React.useEffect(() => {
+    const handleError = (event: ErrorEvent) => {
+      void desktop.diagnostics.reportRendererError(event.message, {
+        filename: event.filename,
+        line: event.lineno,
+        column: event.colno,
+        stack: event.error instanceof Error ? event.error.stack : null,
+      })
+    }
+    const handleRejection = (event: PromiseRejectionEvent) => {
+      const reason = event.reason
+      void desktop.diagnostics.reportRendererError(
+        reason instanceof Error ? reason.message : String(reason),
+        { stack: reason instanceof Error ? reason.stack : null }
+      )
+    }
+    window.addEventListener("error", handleError)
+    window.addEventListener("unhandledrejection", handleRejection)
+    return () => {
+      window.removeEventListener("error", handleError)
+      window.removeEventListener("unhandledrejection", handleRejection)
+    }
+  }, [])
+
   const activateProject = async (overview: ProjectOverview) => {
     setProjectError(null)
     setProject(overview)

@@ -124,6 +124,7 @@ The Rust workspace is divided into the following Electron-independent crates:
 - `rosettacue-translation`
 - `rosettacue-export`
 - `rosettacue-core`
+- `rosettacue-diagnostics`
 
 `apps/backend` is the only desktop transport adapter. `apps/cli` remains a separate presentation adapter over the same core.
 
@@ -144,6 +145,27 @@ resources/backend/rosettacue-backend[.exe]
 ```
 
 Electron starts the process without a shell, sets its working directory to application user data, and provides `ROSETTACUE_MEDIA_TOOLS_DIR`. Pending calls are rejected if the process exits. The sidecar is terminated during application shutdown.
+
+## Diagnostics pipeline
+
+Electron main owns the application-wide diagnostic store. It persists the
+enabled preference before the Rust sidecar starts, writes rotating session
+JSONL files, keeps a bounded current-session buffer, and broadcasts entries to
+the independent Debug Log window. Renderer reloads therefore do not discard
+captured entries.
+
+Rust crates emit typed events through `rosettacue-diagnostics`. The backend
+installs the process sink and forwards those events as `diagnostic-log` protocol
+messages. The active RPC request ID is inherited as a correlation ID by core,
+project, media, OCR, translation, export, and LLM events. Disabled logging takes
+the atomic no-op path before structured details are serialized.
+
+LLM HTTP responses are captured before provider-specific parsing. The entry
+contains the status, an allowlist of safe headers, and the complete raw body,
+which preserves provider-specific fields such as `reasoning_content` even when
+the normalized `content` field is empty. Credential fields, registered API key
+values, data URLs, and binary arrays are redacted before crossing the process
+boundary.
 
 ## Renderer design system
 

@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
+use rosettacue_diagnostics::{DiagnosticEvent, DiagnosticLevel};
 use rosettacue_domain::{
     CueEditDocument, CueGeometry, CueRevision, OcrLine, ProjectMetadata, ReviewStatus, SubtitleCue,
     SubtitlePosition, SubtitleTrack, TextStyle,
@@ -123,6 +124,7 @@ pub enum ExportError {
 ///
 /// Returns an error when track selection is ambiguous, the scope has no usable
 /// cues, or an output file cannot be serialized or written.
+#[allow(clippy::too_many_lines)]
 pub fn export_subtitles(
     metadata: &ProjectMetadata,
     tracks: &[SubtitleTrack],
@@ -130,6 +132,25 @@ pub fn export_subtitles(
     revisions: &[CueRevision],
     options: &ExportOptions,
 ) -> Result<ExportResult, ExportError> {
+    let started = std::time::Instant::now();
+    export_event(
+        "export_subtitles",
+        "start",
+        DiagnosticLevel::Info,
+        "Subtitle export started.",
+        None,
+        || {
+            serde_json::json!({
+                "project_id": metadata.id,
+                "project_name": metadata.name,
+                "track_id": options.track_id,
+                "formats": options.formats,
+                "scope": options.scope,
+                "output_directory": options.output_directory,
+                "base_name": options.base_name
+            })
+        },
+    );
     if options.formats.is_empty() {
         return Err(ExportError::NoFormats);
     }
@@ -195,6 +216,21 @@ pub fn export_subtitles(
             ExportFormat::Srt => render_srt(&document.cues),
         };
         fs::write(&path, contents)?;
+        export_event(
+            "write_artifact",
+            "completed",
+            DiagnosticLevel::Debug,
+            "Subtitle export artifact written.",
+            None,
+            || {
+                serde_json::json!({
+                    "format": format,
+                    "path": path,
+                    "cue_count": document.cues.len(),
+                    "warnings": warnings
+                })
+            },
+        );
         artifacts.push(ExportArtifact {
             format,
             path: path.to_string_lossy().into_owned(),
@@ -202,11 +238,49 @@ pub fn export_subtitles(
             warnings,
         });
     }
-    Ok(ExportResult {
+    let result = ExportResult {
         track_id: track.id,
         artifacts,
         skipped_cues,
-    })
+    };
+    export_event(
+        "export_subtitles",
+        "completed",
+        DiagnosticLevel::Info,
+        "Subtitle export completed.",
+        Some(u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)),
+        || {
+            serde_json::json!({
+                "track_id": result.track_id,
+                "artifacts": result.artifacts,
+                "skipped_cues": result.skipped_cues
+            })
+        },
+    );
+    Ok(result)
+}
+
+fn export_event(
+    operation: &str,
+    phase: &str,
+    level: DiagnosticLevel,
+    message: &str,
+    duration_ms: Option<u64>,
+    details: impl FnOnce() -> serde_json::Value,
+) {
+    if !rosettacue_diagnostics::enabled() {
+        return;
+    }
+    rosettacue_diagnostics::emit(DiagnosticEvent {
+        level,
+        source: "export",
+        category: "file",
+        operation,
+        phase,
+        message,
+        duration_ms,
+        details: details(),
+    });
 }
 
 fn select_track<'a>(

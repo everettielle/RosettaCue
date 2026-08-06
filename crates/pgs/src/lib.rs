@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use decoder::Decoder;
 pub use error::PgsError;
 pub use model::CueImage;
+use rosettacue_diagnostics::{DiagnosticEvent, DiagnosticLevel};
 use sha2::{Digest, Sha256};
 
 pub struct DecodedCues {
@@ -59,6 +60,18 @@ pub fn decode_sup(path: impl AsRef<Path>, padding: u32) -> Result<DecodedCues, P
     if !path.is_file() {
         return Err(PgsError::SourceNotFound(path.to_path_buf()));
     }
+    pgs_event(
+        "decode_sup",
+        "opened",
+        "PGS stream opened for decoding.",
+        || {
+            serde_json::json!({
+                "path": path,
+                "padding": padding,
+                "source_bytes": std::fs::metadata(path).map(|metadata| metadata.len()).ok()
+            })
+        },
+    );
     Ok(DecodedCues {
         source: BufReader::new(File::open(path)?),
         decoder: Decoder::new(padding),
@@ -85,7 +98,45 @@ pub fn write_cue_png(path: impl AsRef<Path>, cue: &CueImage) -> Result<String, P
         writer.write_image_data(&cue.rgb)?;
     }
     std::fs::write(path, &encoded)?;
-    Ok(format!("{:x}", Sha256::digest(&encoded)))
+    let digest = format!("{:x}", Sha256::digest(&encoded));
+    pgs_event(
+        "write_cue_png",
+        "completed",
+        "Decoded cue image written.",
+        || {
+            serde_json::json!({
+                "path": path,
+                "width": cue.width,
+                "height": cue.height,
+                "canvas_width": cue.canvas_width,
+                "canvas_height": cue.canvas_height,
+                "encoded_bytes": encoded.len(),
+                "sha256": digest
+            })
+        },
+    );
+    Ok(digest)
+}
+
+fn pgs_event(
+    operation: &str,
+    phase: &str,
+    message: &str,
+    details: impl FnOnce() -> serde_json::Value,
+) {
+    if !rosettacue_diagnostics::enabled() {
+        return;
+    }
+    rosettacue_diagnostics::emit(DiagnosticEvent {
+        level: DiagnosticLevel::Debug,
+        source: "pgs",
+        category: "decode",
+        operation,
+        phase,
+        message,
+        duration_ms: None,
+        details: details(),
+    });
 }
 
 #[derive(Debug, Clone)]

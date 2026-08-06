@@ -1,5 +1,6 @@
 use std::time::Instant;
 
+use rosettacue_diagnostics::{DiagnosticEvent, DiagnosticLevel};
 use rosettacue_domain::{CueEditDocument, OcrDocument, OcrLine, OcrSpan, TextStyle};
 use rosettacue_llm::{CompletionRequest, ProviderClient, ProviderConfig};
 use serde::Deserialize;
@@ -76,6 +77,7 @@ impl SubtitleTranslator {
     /// # Errors
     ///
     /// Returns an error for empty input, provider failures, or an invalid line mapping.
+    #[allow(clippy::too_many_lines)]
     pub fn translate(
         &self,
         request: &TranslationRequest<'_>,
@@ -92,6 +94,23 @@ impl SubtitleTranslator {
         let mut previous_response: Option<String> = None;
         let mut correction: Option<String> = None;
         for attempt in 1..=self.client.config().max_attempts {
+            translation_event(
+                "translate",
+                "attempt",
+                DiagnosticLevel::Debug,
+                "Translation attempt started.",
+                None,
+                || {
+                    serde_json::json!({
+                        "attempt": attempt,
+                        "provider": self.client.config().provider.as_str(),
+                        "model": self.client.config().model,
+                        "source_language": request.source_language,
+                        "target_language": request.target_language,
+                        "line_count": request.document.subtitle.lines.len()
+                    })
+                },
+            );
             let response = self.client.complete(&CompletionRequest {
                 system: SYSTEM_PROMPT,
                 user_text: &user_text,
@@ -108,26 +127,94 @@ impl SubtitleTranslator {
                         self.client.config(),
                         request.target_language,
                     );
+                    let elapsed_ms =
+                        u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                    translation_event(
+                        "translate",
+                        "succeeded",
+                        DiagnosticLevel::Info,
+                        "Translation response validated.",
+                        Some(elapsed_ms),
+                        || {
+                            serde_json::json!({
+                                "attempt": attempt,
+                                "candidate_content": response.content,
+                                "line_count": document.subtitle.lines.len()
+                            })
+                        },
+                    );
                     return Ok(TranslationOutput {
                         document,
                         raw_response: response.content,
-                        elapsed_ms: u64::try_from(started.elapsed().as_millis())
-                            .unwrap_or(u64::MAX),
+                        elapsed_ms,
                     });
                 }
                 Err(error) if attempt < self.client.config().max_attempts => {
+                    translation_event(
+                        "translate",
+                        "validation_failed",
+                        DiagnosticLevel::Warn,
+                        "Translation response validation failed; retrying.",
+                        None,
+                        || {
+                            serde_json::json!({
+                                "attempt": attempt,
+                                "candidate_content": response.content,
+                                "error": error.to_string()
+                            })
+                        },
+                    );
                     correction = Some(format!(
                         "The previous JSON was invalid: {error}. Return the complete corrected JSON only."
                     ));
                     previous_response = Some(response.content);
                 }
-                Err(error) => return Err(error),
+                Err(error) => {
+                    translation_event(
+                        "translate",
+                        "validation_failed",
+                        DiagnosticLevel::Error,
+                        "Translation response validation failed.",
+                        None,
+                        || {
+                            serde_json::json!({
+                                "attempt": attempt,
+                                "candidate_content": response.content,
+                                "error": error.to_string()
+                            })
+                        },
+                    );
+                    return Err(error);
+                }
             }
         }
         Err(TranslationError::Validation(
             "all translation attempts were exhausted".to_owned(),
         ))
     }
+}
+
+fn translation_event(
+    operation: &str,
+    phase: &str,
+    level: DiagnosticLevel,
+    message: &str,
+    duration_ms: Option<u64>,
+    details: impl FnOnce() -> serde_json::Value,
+) {
+    if !rosettacue_diagnostics::enabled() {
+        return;
+    }
+    rosettacue_diagnostics::emit(DiagnosticEvent {
+        level,
+        source: "translation",
+        category: "pipeline",
+        operation,
+        phase,
+        message,
+        duration_ms,
+        details: details(),
+    });
 }
 
 fn translation_prompt(request: &TranslationRequest<'_>) -> String {

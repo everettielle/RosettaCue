@@ -4,6 +4,7 @@ mod schema;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use rosettacue_diagnostics::{DiagnosticEvent, DiagnosticLevel};
 use rosettacue_domain::{
     CueEditDocument, CueGeometry, CueRecognition, CueReviewDecision, CueRevision, JobKind,
     JobProgress, JobStatus, OcrDocument, OcrStatus, ProjectJob, ProjectMetadata, ProjectSource,
@@ -51,6 +52,13 @@ impl ProjectStore {
             "INSERT INTO project_metadata (id, document) VALUES (1, ?1)",
             params![metadata_json],
         )?;
+
+        project_event(
+            "create_project",
+            "committed",
+            "Project store created.",
+            || serde_json::json!({ "path": root, "name": name, "project_id": metadata.id }),
+        );
 
         Ok(Self { root, connection })
     }
@@ -166,6 +174,12 @@ impl ProjectStore {
         if updated != 1 {
             return Err(ProjectError::MissingMetadata);
         }
+        project_event(
+            "replace_metadata",
+            "committed",
+            "Project metadata replaced.",
+            || serde_json::json!({ "project_id": metadata.id, "name": metadata.name }),
+        );
         Ok(())
     }
 
@@ -232,6 +246,14 @@ impl ProjectStore {
                 metadata,
             ],
         )?;
+        project_event("add_source", "committed", "Project source added.", || {
+            serde_json::json!({
+                "source_id": source.id,
+                "kind": source.kind.as_str(),
+                "display_name": source.display_name,
+                "path": source.path
+            })
+        });
         Ok(())
     }
 
@@ -279,6 +301,14 @@ impl ProjectStore {
                 serde_json::to_string(&track.metadata)?,
             ],
         )?;
+        project_event("add_track", "committed", "Subtitle track added.", || {
+            serde_json::json!({
+                "track_id": track.id,
+                "source_id": track.source_id,
+                "stream_index": track.stream_index,
+                "language": track.language
+            })
+        });
         Ok(())
     }
 
@@ -292,6 +322,12 @@ impl ProjectStore {
             "DELETE FROM tracks WHERE id = ?1",
             params![track_id.to_string()],
         )?;
+        project_event(
+            "remove_track",
+            "committed",
+            "Subtitle track removed.",
+            || serde_json::json!({ "track_id": track_id }),
+        );
         Ok(())
     }
 
@@ -325,6 +361,17 @@ impl ProjectStore {
                 cue.review_status.as_str(),
             ],
         )?;
+        project_event("add_cue", "committed", "Subtitle cue added.", || {
+            serde_json::json!({
+                "cue_id": cue.id,
+                "track_id": cue.track_id,
+                "cue_index": cue.cue_index,
+                "start_ms": cue.start_ms,
+                "end_ms": cue.end_ms,
+                "image_path": cue.image_path,
+                "image_sha256": cue.image_sha256
+            })
+        });
         Ok(())
     }
 
@@ -409,6 +456,15 @@ impl ProjectStore {
                 OffsetDateTime::now_utc().unix_timestamp().to_string(),
             ],
         )?;
+        project_event("start_ocr_run", "committed", "OCR run created.", || {
+            serde_json::json!({
+                "run_id": id,
+                "provider": provider,
+                "model": model,
+                "prompt_version": prompt_version,
+                "language": language
+            })
+        });
         Ok(id)
     }
 
@@ -487,9 +543,21 @@ impl ProjectStore {
         })();
         if let Err(error) = result {
             let _ = self.connection.execute_batch("ROLLBACK");
+            project_event(
+                "save_ocr_success",
+                "rolled_back",
+                "OCR result transaction rolled back.",
+                || serde_json::json!({ "cue_id": cue_id, "run_id": run_id, "error": error.to_string() }),
+            );
             return Err(error);
         }
         self.connection.execute_batch("COMMIT")?;
+        project_event(
+            "save_ocr_success",
+            "committed",
+            "OCR result and revision saved.",
+            || serde_json::json!({ "cue_id": cue_id, "run_id": run_id, "elapsed_ms": elapsed_ms }),
+        );
         Ok(CueRecognition {
             cue_id,
             document: document.clone(),
@@ -533,9 +601,21 @@ impl ProjectStore {
         })();
         if let Err(error) = result {
             let _ = self.connection.execute_batch("ROLLBACK");
+            project_event(
+                "save_ocr_failure",
+                "rolled_back",
+                "OCR failure transaction rolled back.",
+                || serde_json::json!({ "cue_id": cue_id, "run_id": run_id, "error": error.to_string() }),
+            );
             return Err(error);
         }
         self.connection.execute_batch("COMMIT")?;
+        project_event(
+            "save_ocr_failure",
+            "committed",
+            "OCR failure saved.",
+            || serde_json::json!({ "cue_id": cue_id, "run_id": run_id, "error": error }),
+        );
         Ok(())
     }
 
@@ -675,9 +755,21 @@ impl ProjectStore {
         })();
         if let Err(error) = result {
             let _ = self.connection.execute_batch("ROLLBACK");
+            project_event(
+                "delete_cue_revision",
+                "rolled_back",
+                "Revision deletion rolled back.",
+                || serde_json::json!({ "cue_id": cue_id, "revision_id": revision_id, "error": error.to_string() }),
+            );
             return Err(error);
         }
         self.connection.execute_batch("COMMIT")?;
+        project_event(
+            "delete_cue_revision",
+            "committed",
+            "Cue revision deleted.",
+            || serde_json::json!({ "cue_id": cue_id, "revision_id": revision_id }),
+        );
         Ok(())
     }
 
@@ -740,9 +832,23 @@ impl ProjectStore {
         })();
         if let Err(error) = result {
             let _ = self.connection.execute_batch("ROLLBACK");
+            project_event(
+                "save_revision",
+                "rolled_back",
+                "Revision transaction rolled back.",
+                || serde_json::json!({ "cue_id": cue_id, "revision_id": id, "author": author.as_str(), "error": error.to_string() }),
+            );
             return Err(error);
         }
         self.connection.execute_batch("COMMIT")?;
+        project_event("save_revision", "committed", "Cue revision saved.", || {
+            serde_json::json!({
+                "cue_id": cue_id,
+                "revision_id": id,
+                "author": author.as_str(),
+                "document": document
+            })
+        });
         Ok(CueRevision {
             id,
             cue_id,
@@ -869,9 +975,29 @@ impl ProjectStore {
         })();
         if let Err(error) = result {
             let _ = self.connection.execute_batch("ROLLBACK");
+            project_event(
+                "save_review_decision",
+                "rolled_back",
+                "Review transaction rolled back.",
+                || serde_json::json!({ "cue_id": cue_id, "status": status.as_str(), "error": error.to_string() }),
+            );
             return Err(error);
         }
         self.connection.execute_batch("COMMIT")?;
+        project_event(
+            "save_review_decision",
+            "committed",
+            "Cue review decision saved.",
+            || {
+                serde_json::json!({
+                    "cue_id": cue_id,
+                    "decision_id": id,
+                    "revision_id": revision_id,
+                    "status": status.as_str(),
+                    "note": note
+                })
+            },
+        );
         Ok(CueReviewDecision {
             id,
             cue_id,
@@ -905,6 +1031,12 @@ impl ProjectStore {
                 OffsetDateTime::now_utc().unix_timestamp().to_string(),
             ],
         )?;
+        project_event(
+            "record_export",
+            "committed",
+            "Export record saved.",
+            || serde_json::json!({ "format": format, "path": path, "settings": settings }),
+        );
         Ok(())
     }
 
@@ -932,6 +1064,12 @@ impl ProjectStore {
                 serde_json::to_string(request)?,
             ],
         )?;
+        project_event(
+            "enqueue_job",
+            "committed",
+            "Background job queued.",
+            || serde_json::json!({ "job_id": id, "kind": kind.as_str(), "request": request, "progress": progress }),
+        );
         self.job(id)?
             .ok_or_else(|| ProjectError::InvalidRecord("queued job".to_owned()))
     }
@@ -1019,7 +1157,14 @@ impl ProjectStore {
                 id.to_string(),
             ],
         )?;
-        ensure_job_updated(updated)
+        ensure_job_updated(updated)?;
+        project_event(
+            "update_job_progress",
+            "committed",
+            "Background job progress updated.",
+            || serde_json::json!({ "job_id": id, "progress": progress }),
+        );
+        Ok(())
     }
 
     /// Finishes a job with a serializable result.
@@ -1095,7 +1240,21 @@ impl ProjectStore {
                 id.to_string(),
             ],
         )?;
-        ensure_job_updated(updated)
+        ensure_job_updated(updated)?;
+        project_event(
+            "update_job_status",
+            "committed",
+            "Background job status updated.",
+            || {
+                serde_json::json!({
+                    "job_id": id,
+                    "status": status.as_str(),
+                    "error": error,
+                    "result": result
+                })
+            },
+        );
+        Ok(())
     }
 
     fn cue_edit_base(
@@ -1347,6 +1506,31 @@ fn ensure_job_updated(updated: usize) -> Result<(), ProjectError> {
     } else {
         Err(ProjectError::InvalidRecord("job was not found".to_owned()))
     }
+}
+
+fn project_event(
+    operation: &str,
+    phase: &str,
+    message: &str,
+    details: impl FnOnce() -> serde_json::Value,
+) {
+    if !rosettacue_diagnostics::enabled() {
+        return;
+    }
+    rosettacue_diagnostics::emit(DiagnosticEvent {
+        level: if phase == "rolled_back" {
+            DiagnosticLevel::Error
+        } else {
+            DiagnosticLevel::Debug
+        },
+        source: "project",
+        category: "storage",
+        operation,
+        phase,
+        message,
+        duration_ms: None,
+        details: details(),
+    });
 }
 
 type ReviewRow = (String, String, Option<String>, String, String, String);

@@ -198,23 +198,6 @@ export type ProviderConfig = {
 export type OcrPipelineConfig = {
   recognition: ProviderConfig
   validation: ProviderConfig
-  debug_logging: boolean
-}
-
-export type OcrDebugStatus =
-  "succeeded" | "validation_failed" | "provider_failed"
-
-export type OcrDebugLogEntry = {
-  created_at_ms: number
-  cue_id: string
-  cue_index: number
-  stage: string
-  attempt: number
-  provider: string
-  model: string
-  status: OcrDebugStatus
-  raw_response: string | null
-  error: string | null
 }
 
 export type LlmModel = { id: string }
