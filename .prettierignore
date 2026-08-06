@@ -10,6 +10,7 @@ dist/
 dist-electron/
 release/
 target/
+src/paraglide/
 
 # Restored from skills-lock.json, not authored here
 .agents/

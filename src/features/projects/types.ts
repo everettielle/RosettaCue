@@ -87,12 +87,14 @@ export type OcrSpan =
       type: "text"
       text: string
       styles: TextStyle[]
+      color?: string | null
     }
   | {
       type: "ruby"
       base: string
       annotations: Array<{ text: string; position: "over" | "under" }>
       styles: TextStyle[]
+      color?: string | null
     }
 
 export type OcrLine = {

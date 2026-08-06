@@ -1,5 +1,6 @@
 import * as React from "react"
 import type { LucideIcon } from "lucide-react"
+import { usePanelRef } from "react-resizable-panels"
 import {
   CheckCircle2Icon,
   ChevronLeftIcon,
@@ -7,7 +8,9 @@ import {
   DownloadIcon,
   FileOutputIcon,
   FolderInputIcon,
+  HistoryIcon,
   LanguagesIcon,
+  ListChecksIcon,
   PauseIcon,
   PlayIcon,
   Redo2Icon,
@@ -72,6 +75,7 @@ import {
   type WorkspaceSettings,
 } from "@/features/settings/model-settings"
 import { SettingsDialog } from "@/features/settings/settings-dialog"
+import { RevisionHistoryDialog } from "@/features/workspace/revision-history-dialog"
 import {
   ExportDialog,
   PgsExtractionDialog,
@@ -83,9 +87,12 @@ import {
   cueSubtitlePlacement,
 } from "@/features/workspace/cue-geometry"
 import { SubtitleContentEditor } from "@/features/workspace/subtitle-content-editor"
+import { RenderedSubtitle } from "@/features/workspace/rendered-subtitle"
 import { normalizeOcrLines } from "@/features/workspace/subtitle-spans"
 import { desktop } from "@/lib/desktop"
 import { cn } from "@/lib/utils"
+import * as m from "@/paraglide/messages.js"
+import { getLocale } from "@/paraglide/runtime.js"
 
 type RibbonCommand = {
   id:
@@ -100,7 +107,12 @@ type RibbonCommand = {
     | "pause-ocr"
     | "resume-ocr"
     | "stop-ocr"
+    | "ocr-cue"
     | "approve"
+    | "approve-next"
+    | "history"
+    | "previous-cue"
+    | "next-cue"
     | "refresh"
     | "translate-cue"
     | "translate-all"
@@ -108,54 +120,121 @@ type RibbonCommand = {
   icon: LucideIcon
 }
 
+const INSPECTOR_MIN_HEIGHT = 220
+
 const ribbonTabs: Array<{
   value: string
   label: string
   commands: RibbonCommand[]
 }> = [
   {
-    value: "project",
-    label: "Project",
+    value: "home",
+    label: m.workspace_tab_home(),
     commands: [
-      { id: "save", label: "Save", icon: SaveIcon },
-      { id: "save-as", label: "Save As", icon: FileOutputIcon },
-      { id: "import-source", label: "Import Source", icon: FolderInputIcon },
-      { id: "export", label: "Export", icon: DownloadIcon },
+      { id: "save", label: m.workspace_save(), icon: SaveIcon },
+      { id: "undo", label: m.workspace_undo(), icon: Undo2Icon },
+      { id: "redo", label: m.workspace_redo(), icon: Redo2Icon },
+      { id: "ocr-cue", label: m.workspace_ocr_cue(), icon: SparklesIcon },
+      {
+        id: "translate-cue",
+        label: m.workspace_translate_cue(),
+        icon: LanguagesIcon,
+      },
+      {
+        id: "approve-next",
+        label: m.workspace_review_and_next(),
+        icon: ListChecksIcon,
+      },
+      {
+        id: "history",
+        label: m.revision_history_title(),
+        icon: HistoryIcon,
+      },
+    ],
+  },
+  {
+    value: "project",
+    label: m.workspace_tab_project(),
+    commands: [
+      { id: "save", label: m.workspace_save(), icon: SaveIcon },
+      { id: "save-as", label: m.workspace_save_as(), icon: FileOutputIcon },
+      {
+        id: "import-source",
+        label: m.workspace_import_source(),
+        icon: FolderInputIcon,
+      },
+      { id: "export", label: m.workspace_export(), icon: DownloadIcon },
     ],
   },
   {
     value: "edit",
-    label: "Edit",
+    label: m.workspace_tab_edit(),
     commands: [
-      { id: "undo", label: "Undo", icon: Undo2Icon },
-      { id: "redo", label: "Redo", icon: Redo2Icon },
+      { id: "undo", label: m.workspace_undo(), icon: Undo2Icon },
+      { id: "redo", label: m.workspace_redo(), icon: Redo2Icon },
     ],
   },
   {
     value: "subtitle",
-    label: "Subtitle",
+    label: m.workspace_tab_subtitle(),
     commands: [
-      { id: "extract-pgs", label: "Extract PGS", icon: SparklesIcon },
-      { id: "start-ocr", label: "Start Full OCR", icon: PlayIcon },
-      { id: "pause-ocr", label: "Pause", icon: PauseIcon },
-      { id: "resume-ocr", label: "Resume", icon: PlayIcon },
-      { id: "stop-ocr", label: "Stop", icon: SquareIcon },
+      { id: "extract-pgs", label: m.pgs_extract_track(), icon: SparklesIcon },
+      { id: "start-ocr", label: m.workspace_start_full_ocr(), icon: PlayIcon },
+      { id: "pause-ocr", label: m.workspace_pause(), icon: PauseIcon },
+      { id: "resume-ocr", label: m.workspace_resume(), icon: PlayIcon },
+      { id: "stop-ocr", label: m.workspace_stop(), icon: SquareIcon },
     ],
   },
   {
     value: "review",
-    label: "Review",
+    label: m.workspace_tab_review(),
     commands: [
-      { id: "approve", label: "Mark Reviewed", icon: CheckCircle2Icon },
-      { id: "refresh", label: "Refresh Cues", icon: RefreshCwIcon },
+      {
+        id: "approve",
+        label: m.workspace_mark_reviewed(),
+        icon: CheckCircle2Icon,
+      },
+      {
+        id: "approve-next",
+        label: m.workspace_review_and_next(),
+        icon: ListChecksIcon,
+      },
+      {
+        id: "history",
+        label: m.revision_history_title(),
+        icon: HistoryIcon,
+      },
+      {
+        id: "previous-cue",
+        label: m.workspace_previous_cue(),
+        icon: ChevronLeftIcon,
+      },
+      {
+        id: "next-cue",
+        label: m.workspace_next_cue(),
+        icon: ChevronRightIcon,
+      },
+      {
+        id: "refresh",
+        label: m.workspace_refresh_cues(),
+        icon: RefreshCwIcon,
+      },
     ],
   },
   {
     value: "translate",
-    label: "Translate",
+    label: m.workspace_tab_translate(),
     commands: [
-      { id: "translate-cue", label: "Translate Cue", icon: LanguagesIcon },
-      { id: "translate-all", label: "Translate All", icon: PlayIcon },
+      {
+        id: "translate-cue",
+        label: m.workspace_translate_cue(),
+        icon: LanguagesIcon,
+      },
+      {
+        id: "translate-all",
+        label: m.workspace_translate_all(),
+        icon: PlayIcon,
+      },
     ],
   },
 ]
@@ -182,10 +261,47 @@ const subtitlePositions: SubtitlePosition[] = [
 ]
 
 function subtitlePositionLabel(value: SubtitlePosition) {
-  return value
-    .split("-")
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join(" ")
+  const labels: Record<SubtitlePosition, () => string> = {
+    "top-left": m.workspace_position_top_left,
+    "top-center": m.workspace_position_top_center,
+    "top-right": m.workspace_position_top_right,
+    "middle-left": m.workspace_position_middle_left,
+    "middle-center": m.workspace_position_middle_center,
+    "middle-right": m.workspace_position_middle_right,
+    "bottom-left": m.workspace_position_bottom_left,
+    "bottom-center": m.workspace_position_bottom_center,
+    "bottom-right": m.workspace_position_bottom_right,
+  }
+  return labels[value]()
+}
+
+function ocrStatusLabel(value: string) {
+  const labels: Record<string, () => string> = {
+    pending: m.status_ocr_pending,
+    running: m.status_ocr_running,
+    succeeded: m.status_ocr_succeeded,
+    failed: m.status_ocr_failed,
+  }
+  return labels[value]?.() ?? value
+}
+
+function reviewStatusLabel(value: string) {
+  const labels: Record<string, () => string> = {
+    unreviewed: m.status_review_unreviewed,
+    needs_review: m.status_review_needs_review,
+    approved: m.status_review_approved,
+  }
+  return labels[value]?.() ?? value
+}
+
+function ocrControlStateLabel(value: OcrControlState) {
+  const labels: Record<OcrControlState, () => string> = {
+    idle: m.workspace_ocr_state_idle,
+    running: m.workspace_ocr_state_running,
+    paused: m.workspace_ocr_state_paused,
+    stopping: m.workspace_ocr_state_stopping,
+  }
+  return labels[value]()
 }
 
 function formatTimestamp(value: number) {
@@ -236,85 +352,6 @@ function documentForCue(project: ProjectDocument, cueId: string) {
   )
 }
 
-function RenderedSubtitle({
-  document,
-  fontSize,
-  lineHeight,
-}: {
-  document: OcrDocument | null
-  fontSize: number
-  lineHeight: number
-}) {
-  if (!document) {
-    return (
-      <p className="text-preview-muted" style={{ fontSize }}>
-        No OCR text yet
-      </p>
-    )
-  }
-
-  return (
-    <div className="flex w-full flex-col text-preview-foreground [text-shadow:0_1px_2px_var(--preview-shadow),0_0_1px_var(--preview-shadow)]">
-      {document.lines.map((line, lineIndex) => (
-        <p
-          key={`${line.text}-${lineIndex}`}
-          className="m-0 font-medium whitespace-pre"
-          style={{ fontSize, lineHeight: `${lineHeight}px` }}
-        >
-          {line.spans.length === 0 ? (
-            <span>{line.text}</span>
-          ) : (
-            line.spans.map((span, spanIndex) =>
-              span.type === "text" ? (
-                <span
-                  key={spanIndex}
-                  className={cn(
-                    span.styles.includes("bold") && "font-bold",
-                    span.styles.includes("italic") && "italic",
-                    span.styles.includes("underline") && "underline",
-                    span.styles.includes("strikethrough") && "line-through",
-                    span.styles.includes("superscript") &&
-                      "align-super text-[0.75em] leading-none",
-                    span.styles.includes("subscript") &&
-                      "align-sub text-[0.75em] leading-none"
-                  )}
-                >
-                  {span.text}
-                </span>
-              ) : (
-                <ruby
-                  key={spanIndex}
-                  style={{
-                    rubyPosition:
-                      span.annotations[0]?.position === "under"
-                        ? "under"
-                        : "over",
-                  }}
-                  className={cn(
-                    span.styles.includes("bold") && "font-bold",
-                    span.styles.includes("italic") && "italic",
-                    span.styles.includes("underline") && "underline",
-                    span.styles.includes("strikethrough") && "line-through",
-                    span.styles.includes("superscript") &&
-                      "align-super text-[0.75em] leading-none",
-                    span.styles.includes("subscript") &&
-                      "align-sub text-[0.75em] leading-none"
-                  )}
-                >
-                  {span.base}
-                  {span.annotations.map((annotation, annotationIndex) => (
-                    <rt key={annotationIndex}>{annotation.text}</rt>
-                  ))}
-                </ruby>
-              )
-            )
-          )}
-        </p>
-      ))}
-    </div>
-  )
-}
-
 function IconButton({
   label,
   icon: Icon,
@@ -362,7 +399,9 @@ export function ProjectWorkspace({
   const [loading, setLoading] = React.useState(true)
   const [saving, setSaving] = React.useState(false)
   const [error, setError] = React.useState<string | null>(null)
-  const [statusMessage, setStatusMessage] = React.useState("Ready")
+  const [statusMessage, setStatusMessage] = React.useState<string>(
+    m.status_ready()
+  )
   const [settings, setSettings] = React.useState<WorkspaceSettings>(
     loadWorkspaceSettings
   )
@@ -371,6 +410,7 @@ export function ProjectWorkspace({
   const [sourceImportOpen, setSourceImportOpen] = React.useState(false)
   const [pgsOpen, setPgsOpen] = React.useState(false)
   const [exportOpen, setExportOpen] = React.useState(false)
+  const [revisionHistoryOpen, setRevisionHistoryOpen] = React.useState(false)
   const [pgsProgress, setPgsProgress] =
     React.useState<PgsExtractionProgress | null>(null)
   const [pgsBusy, setPgsBusy] = React.useState(false)
@@ -381,6 +421,32 @@ export function ProjectWorkspace({
     React.useState<TranslationProgress | null>(null)
   const [translationBusy, setTranslationBusy] = React.useState(false)
   const [redoByCue, setRedoByCue] = React.useState<Record<string, string[]>>({})
+  const [inspectorContentHeight, setInspectorContentHeight] = React.useState<
+    number | null
+  >(null)
+  const inspectorPanelRef = usePanelRef()
+  const inspectorMaxHeight =
+    inspectorContentHeight === null
+      ? undefined
+      : Math.max(INSPECTOR_MIN_HEIGHT, inspectorContentHeight)
+
+  const handleInspectorContentHeightChange = React.useCallback(
+    (height: number) => {
+      setInspectorContentHeight((current) =>
+        current === height ? current : height
+      )
+    },
+    []
+  )
+
+  React.useLayoutEffect(() => {
+    if (inspectorMaxHeight === undefined) return
+
+    const panel = inspectorPanelRef.current
+    if (panel && panel.getSize().inPixels > inspectorMaxHeight) {
+      panel.resize(inspectorMaxHeight)
+    }
+  }, [inspectorMaxHeight, inspectorPanelRef])
 
   const loadDocument = React.useCallback(async () => {
     setLoading(true)
@@ -395,10 +461,10 @@ export function ProjectWorkspace({
           ? current
           : (next.cues[0]?.id ?? null)
       )
-      setStatusMessage("Project loaded")
+      setStatusMessage(m.status_project_loaded())
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason))
-      setStatusMessage("Unable to load project")
+      setStatusMessage(m.status_unable_load_project())
     } finally {
       setLoading(false)
     }
@@ -414,14 +480,14 @@ export function ProjectWorkspace({
         }
         setDocument(next)
         setActiveCueId(next.cues[0]?.id ?? null)
-        setStatusMessage("Project loaded")
+        setStatusMessage(m.status_project_loaded())
       })
       .catch((reason: unknown) => {
         if (!active) {
           return
         }
         setError(reason instanceof Error ? reason.message : String(reason))
-        setStatusMessage("Unable to load project")
+        setStatusMessage(m.status_unable_load_project())
       })
       .finally(() => {
         if (active) {
@@ -667,7 +733,7 @@ export function ProjectWorkspace({
     const startMs = parseTimestamp(cueDraft.start)
     const endMs = parseTimestamp(cueDraft.end)
     if (startMs === null || endMs === null || endMs <= startMs) {
-      setError("Use HH:MM:SS.mmm timestamps and make End later than Start.")
+      setError(m.workspace_timestamp_error())
       return
     }
     setSaving(true)
@@ -692,10 +758,10 @@ export function ProjectWorkspace({
         delete next[selectedCue.id]
         return next
       })
-      setStatusMessage(`Cue ${selectedCue.cue_index} saved`)
+      setStatusMessage(m.status_cue_saved({ index: selectedCue.cue_index }))
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason))
-      setStatusMessage("Unable to save cue")
+      setStatusMessage(m.status_unable_save_cue())
     } finally {
       setSaving(false)
     }
@@ -706,7 +772,7 @@ export function ProjectWorkspace({
     if (message) {
       setError(message)
       setSettingsOpen(true)
-      setStatusMessage("Configure the task model to continue")
+      setStatusMessage(m.status_configure_model())
       return false
     }
     return true
@@ -717,7 +783,7 @@ export function ProjectWorkspace({
     setError(null)
     setOcrState("running")
     setOcrProgress(null)
-    setStatusMessage(cueIds ? "Running OCR for selected Cue" : "OCR started")
+    setStatusMessage(cueIds ? m.status_ocr_selected() : m.status_ocr_started())
     try {
       const result = await desktop.invoke<OcrJobResult>("recognize_ocr", {
         projectPath: project.path,
@@ -731,10 +797,10 @@ export function ProjectWorkspace({
       })
       onProjectChange(result.project)
       await loadDocument()
-      setStatusMessage(`OCR completed · ${result.processed} Cues processed`)
+      setStatusMessage(m.status_ocr_completed({ count: result.processed }))
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason))
-      setStatusMessage("OCR stopped with an error")
+      setStatusMessage(m.status_ocr_error())
     } finally {
       setOcrState("idle")
     }
@@ -753,10 +819,10 @@ export function ProjectWorkspace({
       setOcrState(nextState)
       setStatusMessage(
         action === "pause"
-          ? "OCR will pause at the next safe Cue boundary"
+          ? m.status_ocr_pause_pending()
           : action === "resume"
-            ? "OCR resumed"
-            : "OCR will stop at the next safe Cue boundary"
+            ? m.status_ocr_resumed()
+            : m.status_ocr_stop_pending()
       )
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason))
@@ -769,7 +835,7 @@ export function ProjectWorkspace({
     setTranslationProgress(null)
     setError(null)
     setStatusMessage(
-      cueIds ? "Translating selected Cue" : "Translation started"
+      cueIds ? m.status_translation_selected() : m.status_translation_started()
     )
     try {
       const result = await desktop.invoke<TranslationJobResult>(
@@ -785,17 +851,17 @@ export function ProjectWorkspace({
       onProjectChange(result.project)
       await loadDocument()
       setStatusMessage(
-        `Translation completed · ${result.processed} Cues processed`
+        m.status_translation_completed({ count: result.processed })
       )
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason))
-      setStatusMessage("Translation stopped with an error")
+      setStatusMessage(m.status_translation_error())
     } finally {
       setTranslationBusy(false)
     }
   }
 
-  const reviewSelectedCue = async () => {
+  const reviewSelectedCue = async (moveToNext = false) => {
     if (!selectedCue || !selectedDocument) return
     setError(null)
     try {
@@ -810,7 +876,8 @@ export function ProjectWorkspace({
       )
       onProjectChange(result.project)
       await loadDocument()
-      setStatusMessage(`Cue ${selectedCue.cue_index} marked reviewed`)
+      setStatusMessage(m.status_cue_reviewed({ index: selectedCue.cue_index }))
+      if (moveToNext) selectAdjacentCue(1)
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason))
     }
@@ -825,7 +892,7 @@ export function ProjectWorkspace({
         { projectPath: project.path, cueId: selectedCue.id }
       )
       if (history.length < 2) {
-        setStatusMessage("No earlier Cue revision is available")
+        setStatusMessage(m.status_no_earlier_revision())
         return
       }
       setRedoByCue((current) => ({
@@ -838,7 +905,7 @@ export function ProjectWorkspace({
         revisionId: history[1].id,
       })
       await loadDocument()
-      setStatusMessage(`Undid Cue ${selectedCue.cue_index}`)
+      setStatusMessage(m.status_undid_cue({ index: selectedCue.cue_index }))
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason))
     }
@@ -861,7 +928,7 @@ export function ProjectWorkspace({
         [selectedCue.id]: (current[selectedCue.id] ?? []).slice(0, -1),
       }))
       await loadDocument()
-      setStatusMessage(`Redid Cue ${selectedCue.cue_index}`)
+      setStatusMessage(m.status_redid_cue({ index: selectedCue.cue_index }))
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason))
     }
@@ -883,7 +950,7 @@ export function ProjectWorkspace({
       onProjectChange(result.project)
       await loadDocument()
       setPgsOpen(false)
-      setStatusMessage(`PGS extraction complete · ${result.cue_count} Cues`)
+      setStatusMessage(m.status_pgs_complete({ count: result.cue_count }))
     } catch (reason) {
       setPgsError(reason instanceof Error ? reason.message : String(reason))
     } finally {
@@ -904,11 +971,13 @@ export function ProjectWorkspace({
       case "export":
         return !document?.tracks.length
       case "undo":
-        return !selectedCue || document?.revisions.length === 0
+        return !selectedRevision
       case "redo":
         return !selectedCue || !(redoByCue[selectedCue.id]?.length > 0)
       case "start-ocr":
         return ocrState !== "idle" || !document?.cues.length
+      case "ocr-cue":
+        return ocrState !== "idle" || !selectedCue
       case "pause-ocr":
         return ocrState !== "running"
       case "resume-ocr":
@@ -916,8 +985,22 @@ export function ProjectWorkspace({
       case "stop-ocr":
         return ocrState === "idle" || ocrState === "stopping"
       case "approve":
+        return !selectedDocument || selectedCue?.review_status === "approved"
+      case "approve-next":
+        return (
+          !selectedDocument ||
+          selectedCue?.review_status === "approved" ||
+          selectedIndex < 0 ||
+          selectedIndex >= filteredCues.length - 1
+        )
+      case "history":
+        return !selectedCue
+      case "previous-cue":
+        return selectedIndex <= 0
+      case "next-cue":
+        return selectedIndex < 0 || selectedIndex >= filteredCues.length - 1
       case "translate-cue":
-        return !selectedDocument
+        return !selectedDocument || translationBusy
       case "translate-all":
         return translationBusy || !document?.revisions.length
       default:
@@ -929,7 +1012,7 @@ export function ProjectWorkspace({
     switch (command.id) {
       case "save":
         if (draftChanged) void saveCue()
-        else setStatusMessage("Project is up to date")
+        else setStatusMessage(m.status_project_up_to_date())
         return
       case "save-as":
         setSaveAsOpen(true)
@@ -953,6 +1036,9 @@ export function ProjectWorkspace({
       case "start-ocr":
         void runOcr()
         return
+      case "ocr-cue":
+        if (selectedCue) void runOcr([selectedCue.id])
+        return
       case "pause-ocr":
         void controlOcr("pause")
         return
@@ -964,6 +1050,18 @@ export function ProjectWorkspace({
         return
       case "approve":
         void reviewSelectedCue()
+        return
+      case "approve-next":
+        void reviewSelectedCue(true)
+        return
+      case "history":
+        setRevisionHistoryOpen(true)
+        return
+      case "previous-cue":
+        selectAdjacentCue(-1)
+        return
+      case "next-cue":
+        selectAdjacentCue(1)
         return
       case "refresh":
         void loadDocument()
@@ -1001,7 +1099,7 @@ export function ProjectWorkspace({
         </div>
       </header>
 
-      <Tabs defaultValue="project" className="shrink-0 gap-0">
+      <Tabs defaultValue="home" className="shrink-0 gap-0">
         <TabsList
           variant="line"
           className="h-9 w-full shrink-0 justify-start rounded-none border-b px-4"
@@ -1023,14 +1121,14 @@ export function ProjectWorkspace({
             value={tab.value}
             className="flex min-h-0 flex-1 flex-col"
           >
-            <div className="flex h-20 shrink-0 items-center gap-1 border-b bg-muted/30 px-3">
+            <div className="flex h-20 shrink-0 items-center gap-1 overflow-x-auto border-b bg-muted/30 px-3">
               {tab.commands.map((command) => {
                 const Icon = command.icon
                 return (
                   <Button
-                    key={command.label}
+                    key={command.id}
                     variant="ghost"
-                    className="h-14 flex-col gap-1 px-3"
+                    className="h-14 shrink-0 flex-col gap-1 px-3"
                     disabled={commandDisabled(command)}
                     onClick={() => handleRibbonCommand(command)}
                   >
@@ -1040,29 +1138,32 @@ export function ProjectWorkspace({
                 )
               })}
               <Separator orientation="vertical" className="mx-2" />
-              <div className="ml-auto flex items-center gap-6 px-2">
-                <RibbonStatistic value={statistics.cue_count} label="cues" />
+              <div className="ml-auto flex shrink-0 items-center gap-6 px-2">
+                <RibbonStatistic
+                  value={statistics.cue_count}
+                  label={m.workspace_stat_cues()}
+                />
                 <RibbonStatistic
                   value={statistics.source_count}
-                  label="sources"
+                  label={m.workspace_stat_sources()}
                 />
                 <RibbonStatistic
                   value={statistics.ocr_completed_count}
-                  label="OCR complete"
+                  label={m.workspace_ocr_complete()}
                 />
                 <RibbonStatistic
                   value={statistics.reviewed_count}
-                  label="reviewed"
+                  label={m.workspace_stat_reviewed()}
                 />
               </div>
               <Separator orientation="vertical" className="mx-2" />
               <Button
                 variant="ghost"
-                className="h-14 flex-col gap-1 px-3"
+                className="h-14 shrink-0 flex-col gap-1 px-3"
                 onClick={() => setSettingsOpen(true)}
               >
                 <Settings2Icon data-icon="inline-start" />
-                <span className="text-xs">Settings</span>
+                <span className="text-xs">{m.workspace_settings()}</span>
               </Button>
             </div>
           </TabsContent>
@@ -1071,17 +1172,24 @@ export function ProjectWorkspace({
 
       {error && (
         <Alert variant="destructive" className="m-3 shrink-0">
-          <AlertTitle>Project action failed</AlertTitle>
+          <AlertTitle>{m.workspace_action_failed()}</AlertTitle>
           <AlertDescription>{error}</AlertDescription>
         </Alert>
       )}
 
       <div className="min-h-0 flex-1">
         <ResizablePanelGroup orientation="horizontal">
-          <ResizablePanel defaultSize="22%" minSize="16%" maxSize="34%">
+          <ResizablePanel
+            defaultSize="22%"
+            minSize={180}
+            maxSize="34%"
+            className="min-w-0 overflow-hidden"
+          >
             <section className="flex h-full min-h-0 flex-col bg-muted/20">
               <div className="flex h-11 shrink-0 items-center gap-2 border-b px-3">
-                <h2 className="text-sm font-medium">Cue List</h2>
+                <h2 className="text-sm font-medium">
+                  {m.workspace_cue_list()}
+                </h2>
                 <Badge variant="secondary" className="ml-auto">
                   {filteredCues.length}
                 </Badge>
@@ -1092,8 +1200,8 @@ export function ProjectWorkspace({
                   <Input
                     value={query}
                     className="pl-8"
-                    placeholder="Number or text"
-                    aria-label="Search cues"
+                    placeholder={m.workspace_search_placeholder()}
+                    aria-label={m.workspace_search_cues()}
                     onChange={(event) => setQuery(event.target.value)}
                   />
                 </div>
@@ -1109,9 +1217,9 @@ export function ProjectWorkspace({
                       <EmptyMedia variant="icon">
                         <SearchIcon />
                       </EmptyMedia>
-                      <EmptyTitle>No cues</EmptyTitle>
+                      <EmptyTitle>{m.workspace_no_cues()}</EmptyTitle>
                       <EmptyDescription>
-                        Import a source and extract a PGS track to begin.
+                        {m.workspace_no_cues_description()}
                       </EmptyDescription>
                     </EmptyHeader>
                   </Empty>
@@ -1134,7 +1242,7 @@ export function ProjectWorkspace({
                             </span>
                           </span>
                           <span className="truncate text-xs font-normal text-muted-foreground">
-                            {cueText.get(cue.id) || "Waiting for OCR"}
+                            {cueText.get(cue.id) || m.workspace_waiting_ocr()}
                           </span>
                         </span>
                       </Button>
@@ -1147,34 +1255,27 @@ export function ProjectWorkspace({
 
           <ResizableHandle />
 
-          <ResizablePanel defaultSize="78%" minSize="60%">
+          <ResizablePanel
+            defaultSize="78%"
+            minSize={360}
+            className="min-w-0 overflow-hidden"
+          >
             <ResizablePanelGroup orientation="vertical">
-              <ResizablePanel defaultSize="50%" minSize="30%">
+              <ResizablePanel
+                defaultSize="55%"
+                minSize={220}
+                className="min-h-0 overflow-hidden"
+              >
                 <section className="flex h-full min-h-0 flex-col">
                   <div className="flex h-11 shrink-0 items-center gap-2 border-b px-3">
                     <p className="text-sm font-medium">
-                      {selectedCue ? `Cue ${selectedCue.cue_index}` : "Preview"}
+                      {selectedCue
+                        ? m.workspace_cue({ index: selectedCue.cue_index })
+                        : m.workspace_preview()}
                     </p>
-                    <div className="ml-auto flex items-center gap-1">
-                      <IconButton
-                        label="Previous cue"
-                        icon={ChevronLeftIcon}
-                        onClick={() => selectAdjacentCue(-1)}
-                        disabled={selectedIndex <= 0}
-                      />
-                      <IconButton
-                        label="Next cue"
-                        icon={ChevronRightIcon}
-                        onClick={() => selectAdjacentCue(1)}
-                        disabled={
-                          selectedIndex < 0 ||
-                          selectedIndex >= filteredCues.length - 1
-                        }
-                      />
-                    </div>
                   </div>
 
-                  <div className="min-h-0 flex-1 bg-muted/20 p-3">
+                  <div className="@container min-h-0 flex-1 bg-muted/20 p-3">
                     {selectedCue ? (
                       <CueComparison
                         key={selectedCue.id}
@@ -1189,10 +1290,9 @@ export function ProjectWorkspace({
                           <EmptyMedia variant="icon">
                             <SparklesIcon />
                           </EmptyMedia>
-                          <EmptyTitle>Workspace ready</EmptyTitle>
+                          <EmptyTitle>{m.workspace_empty_title()}</EmptyTitle>
                           <EmptyDescription>
-                            Import a Blu-ray source, extract PGS cues, and begin
-                            reviewing as OCR results arrive.
+                            {m.workspace_empty_description()}
                           </EmptyDescription>
                         </EmptyHeader>
                       </Empty>
@@ -1203,7 +1303,14 @@ export function ProjectWorkspace({
 
               <ResizableHandle />
 
-              <ResizablePanel defaultSize="50%" minSize="32%" maxSize="70%">
+              <ResizablePanel
+                defaultSize="45%"
+                minSize={INSPECTOR_MIN_HEIGHT}
+                maxSize={inspectorMaxHeight}
+                groupResizeBehavior="preserve-pixel-size"
+                panelRef={inspectorPanelRef}
+                className="min-h-0 overflow-hidden"
+              >
                 <Inspector
                   cue={selectedCue}
                   document={selectedDocument}
@@ -1221,6 +1328,17 @@ export function ProjectWorkspace({
                     if (selectedCue) void translate([selectedCue.id])
                   }}
                   onApprove={() => void reviewSelectedCue()}
+                  onOpenHistory={() => setRevisionHistoryOpen(true)}
+                  cuePosition={selectedIndex + 1}
+                  cueCount={filteredCues.length}
+                  onPrevious={() => selectAdjacentCue(-1)}
+                  onNext={() => selectAdjacentCue(1)}
+                  previousDisabled={selectedIndex <= 0}
+                  nextDisabled={
+                    selectedIndex < 0 ||
+                    selectedIndex >= filteredCues.length - 1
+                  }
+                  onContentHeightChange={handleInspectorContentHeightChange}
                 />
               </ResizablePanel>
             </ResizablePanelGroup>
@@ -1232,13 +1350,19 @@ export function ProjectWorkspace({
         <span>{statusMessage}</span>
         {ocrProgress && ocrState !== "idle" && (
           <span className="ml-3 tabular-nums">
-            OCR {ocrProgress.current}/{ocrProgress.total} · {ocrState}
+            {m.workspace_ocr_progress({
+              current: ocrProgress.current,
+              total: ocrProgress.total,
+              state: ocrControlStateLabel(ocrState),
+            })}
           </span>
         )}
         {translationProgress && translationBusy && (
           <span className="ml-3 tabular-nums">
-            Translation {translationProgress.current}/
-            {translationProgress.total}
+            {m.workspace_translation_progress({
+              current: translationProgress.current,
+              total: translationProgress.total,
+            })}
           </span>
         )}
       </footer>
@@ -1251,7 +1375,24 @@ export function ProjectWorkspace({
           setSettings(next)
           saveWorkspaceSettings(next)
           setError(null)
-          setStatusMessage("Settings saved")
+          setStatusMessage(m.status_settings_saved())
+        }}
+      />
+      <RevisionHistoryDialog
+        open={revisionHistoryOpen}
+        projectPath={project.path}
+        cue={selectedCue}
+        onOpenChange={setRevisionHistoryOpen}
+        onChanged={async (message) => {
+          if (selectedCue) {
+            setDraftByCue((current) => {
+              const next = { ...current }
+              delete next[selectedCue.id]
+              return next
+            })
+          }
+          await loadDocument()
+          setStatusMessage(message)
         }}
       />
       <SaveProjectAsDialog
@@ -1261,7 +1402,9 @@ export function ProjectWorkspace({
         onOpenChange={setSaveAsOpen}
         onSaved={(next) => {
           onProjectChange(next)
-          setStatusMessage(`Project saved as ${next.metadata.name}`)
+          setStatusMessage(
+            m.status_project_saved_as({ name: next.metadata.name })
+          )
         }}
       />
       <SourceImportDialog
@@ -1271,7 +1414,9 @@ export function ProjectWorkspace({
         onImported={(result: SourceImportResult) => {
           onProjectChange(result.project)
           void loadDocument()
-          setStatusMessage(`Source ${result.source.display_name} imported`)
+          setStatusMessage(
+            m.status_source_imported({ name: result.source.display_name })
+          )
         }}
       />
       {document && (
@@ -1303,7 +1448,7 @@ function RibbonStatistic({ value, label }: { value: number; label: string }) {
   return (
     <div className="flex items-baseline gap-1.5 whitespace-nowrap">
       <span className="text-lg font-semibold text-foreground tabular-nums">
-        {value.toLocaleString()}
+        {value.toLocaleString(getLocale())}
       </span>
       <span className="text-xs text-muted-foreground">{label}</span>
     </div>
@@ -1365,10 +1510,10 @@ function CueComparison({
   }, [cue.image_path, projectPath])
 
   return (
-    <div className="grid h-full min-h-0 grid-cols-2 overflow-hidden rounded-xl border bg-border shadow-sm">
+    <div className="grid h-full min-h-0 grid-cols-1 grid-rows-2 overflow-hidden rounded-xl border bg-border shadow-sm @[44rem]:grid-cols-2 @[44rem]:grid-rows-1">
       <div className="flex min-w-0 flex-col bg-card">
         <div className="flex h-9 shrink-0 items-center border-b px-3 text-xs font-medium">
-          Original cue
+          {m.workspace_preview_original()}
         </div>
         <div className="flex min-h-0 flex-1 items-center justify-center bg-preview p-5">
           {imageUrl ? (
@@ -1377,7 +1522,9 @@ function CueComparison({
               viewBox={`0 0 ${imagePlacement.canvasWidth} ${imagePlacement.canvasHeight}`}
               preserveAspectRatio="xMidYMid meet"
               role="img"
-              aria-label={`Original subtitle cue ${cue.cue_index} at its Blu-ray canvas position`}
+              aria-label={m.workspace_cue_image_aria({
+                index: cue.cue_index,
+              })}
             >
               <image
                 href={imageUrl}
@@ -1389,7 +1536,9 @@ function CueComparison({
               />
             </svg>
           ) : imageError ? (
-            <p className="text-xs text-preview-muted">Cue image unavailable</p>
+            <p className="text-xs text-preview-muted">
+              {m.workspace_cue_image_unavailable()}
+            </p>
           ) : (
             <Spinner className="text-preview-foreground" />
           )}
@@ -1397,7 +1546,7 @@ function CueComparison({
       </div>
       <div className="flex min-w-0 flex-col bg-card">
         <div className="flex h-9 shrink-0 items-center border-b px-3 text-xs font-medium">
-          Subtitle preview
+          {m.workspace_preview_subtitle()}
         </div>
         <div className="flex min-h-0 flex-1 items-center justify-center bg-preview p-5">
           <svg
@@ -1405,7 +1554,7 @@ function CueComparison({
             viewBox={`0 0 ${subtitlePlacement.canvasWidth} ${subtitlePlacement.canvasHeight}`}
             preserveAspectRatio="xMidYMid meet"
             role="img"
-            aria-label={`Generated subtitle preview for cue ${cue.cue_index}`}
+            aria-label={m.workspace_preview_aria({ index: cue.cue_index })}
           >
             <foreignObject
               x={subtitlePlacement.x}
@@ -1449,7 +1598,7 @@ function PositionGrid({
       <div
         className="grid w-full max-w-44 grid-cols-3 gap-1.5"
         role="radiogroup"
-        aria-label="Subtitle position"
+        aria-label={m.workspace_subtitle_position()}
       >
         {subtitlePositions.map((position) => {
           const [vertical, horizontal] = position.split("-")
@@ -1513,6 +1662,14 @@ function Inspector({
   onOcr,
   onTranslate,
   onApprove,
+  onOpenHistory,
+  cuePosition,
+  cueCount,
+  onPrevious,
+  onNext,
+  previousDisabled,
+  nextDisabled,
+  onContentHeightChange,
 }: {
   cue: SubtitleCue | null
   document: OcrDocument | null
@@ -1526,18 +1683,57 @@ function Inspector({
   onOcr: () => void
   onTranslate: () => void
   onApprove: () => void
+  onOpenHistory: () => void
+  cuePosition: number
+  cueCount: number
+  onPrevious: () => void
+  onNext: () => void
+  previousDisabled: boolean
+  nextDisabled: boolean
+  onContentHeightChange: (height: number) => void
 }) {
+  const headerRef = React.useRef<HTMLDivElement>(null)
+  const contentRef = React.useRef<HTMLDivElement>(null)
+
+  React.useLayoutEffect(() => {
+    const header = headerRef.current
+    const content = contentRef.current
+    if (!header || !content) return
+
+    const reportHeight = () => {
+      onContentHeightChange(
+        Math.ceil(
+          header.getBoundingClientRect().height +
+            content.getBoundingClientRect().height
+        )
+      )
+    }
+    const observer = new ResizeObserver(reportHeight)
+    observer.observe(header)
+    observer.observe(content)
+    reportHeight()
+
+    return () => observer.disconnect()
+  }, [onContentHeightChange])
+
   return (
     <aside className="flex h-full min-h-0 flex-col bg-background">
-      <div className="flex min-h-11 shrink-0 items-center gap-2 border-b px-3 py-1.5">
-        <h2 className="text-sm font-medium">Inspector</h2>
+      <div
+        ref={headerRef}
+        className="flex min-h-11 shrink-0 flex-wrap items-center gap-2 border-b px-3 py-1.5"
+      >
+        <h2 className="text-sm font-medium">{m.workspace_inspector()}</h2>
         {cue && (
           <>
-            <span className="text-xs text-muted-foreground">
-              Cue {cue.cue_index}
-            </span>
-            <Badge variant="outline">{cue.review_status}</Badge>
-            <div className="ml-auto flex items-center gap-2">
+            <Badge variant="secondary">
+              {m.workspace_ocr_status({
+                status: ocrStatusLabel(cue.ocr_status),
+              })}
+            </Badge>
+            <Badge variant="outline">
+              {reviewStatusLabel(cue.review_status)}
+            </Badge>
+            <div className="ml-auto flex flex-wrap items-center gap-2">
               <Button
                 size="sm"
                 variant="outline"
@@ -1549,7 +1745,7 @@ function Inspector({
                 ) : (
                   <SparklesIcon data-icon="inline-start" />
                 )}
-                OCR Cue
+                {m.workspace_ocr_cue()}
               </Button>
               <Button
                 size="sm"
@@ -1562,7 +1758,11 @@ function Inspector({
                 ) : (
                   <LanguagesIcon data-icon="inline-start" />
                 )}
-                Translate
+                {m.workspace_translate()}
+              </Button>
+              <Button size="sm" variant="outline" onClick={onOpenHistory}>
+                <HistoryIcon data-icon="inline-start" />
+                {m.revision_history_title()}
               </Button>
               <Button
                 size="sm"
@@ -1572,97 +1772,124 @@ function Inspector({
               >
                 <CheckCircle2Icon data-icon="inline-start" />
                 {cue.review_status === "approved"
-                  ? "Reviewed"
-                  : "Mark as Reviewed"}
+                  ? m.workspace_reviewed()
+                  : m.workspace_mark_reviewed()}
               </Button>
+              <Separator orientation="vertical" className="mx-1" />
+              <span className="text-xs whitespace-nowrap text-muted-foreground tabular-nums">
+                {m.workspace_cue({ index: cue.cue_index })} ·{" "}
+                {m.workspace_cue_position({
+                  current: cuePosition,
+                  total: cueCount,
+                })}
+              </span>
+              <IconButton
+                label={m.workspace_previous_cue()}
+                icon={ChevronLeftIcon}
+                onClick={onPrevious}
+                disabled={previousDisabled}
+              />
+              <IconButton
+                label={m.workspace_next_cue()}
+                icon={ChevronRightIcon}
+                onClick={onNext}
+                disabled={nextDisabled}
+              />
             </div>
           </>
         )}
       </div>
-      {cue ? (
-        <ScrollArea className="min-h-0 flex-1">
-          <div className="grid gap-4 p-3 lg:grid-cols-[minmax(0,3fr)_minmax(18rem,2fr)]">
-            <section className="min-w-0">
-              <FieldGroup>
-                <Field>
-                  <div className="flex items-center gap-2">
-                    <FieldLabel htmlFor="cue-content">Content</FieldLabel>
-                    <Badge
-                      variant={changed ? "secondary" : "ghost"}
-                      className="ml-auto"
-                    >
-                      {changed ? "Unsaved" : "Saved"}
-                    </Badge>
-                  </div>
-                  <SubtitleContentEditor
-                    lines={draft?.lines ?? []}
-                    disabled={!document || saving}
-                    onChange={(lines) => onDraftChange({ lines })}
-                  />
-                  <Button onClick={onSave} disabled={!changed || saving}>
-                    {saving ? (
-                      <Spinner data-icon="inline-start" />
-                    ) : (
-                      <SaveIcon data-icon="inline-start" />
-                    )}
-                    Save Cue
-                  </Button>
-                </Field>
-              </FieldGroup>
-            </section>
+      <ScrollArea className="min-h-0 flex-1">
+        <div ref={contentRef}>
+          {cue ? (
+            <div className="grid gap-4 p-3 lg:grid-cols-[minmax(0,3fr)_minmax(18rem,2fr)]">
+              <section className="min-w-0">
+                <FieldGroup>
+                  <Field>
+                    <div className="flex items-center gap-2">
+                      <FieldLabel htmlFor="cue-content">
+                        {m.workspace_content()}
+                      </FieldLabel>
+                      <Badge
+                        variant={changed ? "secondary" : "ghost"}
+                        className="ml-auto"
+                      >
+                        {changed ? m.workspace_unsaved() : m.workspace_saved()}
+                      </Badge>
+                    </div>
+                    <SubtitleContentEditor
+                      lines={draft?.lines ?? []}
+                      disabled={!document || saving}
+                      onChange={(lines) => onDraftChange({ lines })}
+                    />
+                    <Button onClick={onSave} disabled={!changed || saving}>
+                      {saving ? (
+                        <Spinner data-icon="inline-start" />
+                      ) : (
+                        <SaveIcon data-icon="inline-start" />
+                      )}
+                      {m.workspace_save_cue()}
+                    </Button>
+                  </Field>
+                </FieldGroup>
+              </section>
 
-            <section className="flex min-w-0 flex-col gap-3 border-t pt-3 lg:border-t-0 lg:border-l lg:pt-0 lg:pl-4">
-              <div className="flex items-center gap-2">
-                <p className="text-sm font-medium">Timing & placement</p>
-                <Badge variant="secondary" className="ml-auto">
-                  {cue.ocr_status}
-                </Badge>
-              </div>
-              <div className="grid grid-cols-2 gap-2">
+              <section className="flex min-w-0 flex-col gap-3 border-t pt-3 lg:border-t-0 lg:border-l lg:pt-0 lg:pl-4">
+                <div className="flex items-center gap-2">
+                  <p className="text-sm font-medium">
+                    {m.workspace_timing_placement()}
+                  </p>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <Field>
+                    <FieldLabel htmlFor="cue-start">
+                      {m.workspace_start()}
+                    </FieldLabel>
+                    <Input
+                      id="cue-start"
+                      value={draft?.start ?? formatTimestamp(cue.start_ms)}
+                      disabled={!document || saving}
+                      onChange={(event) =>
+                        onDraftChange({ start: event.target.value })
+                      }
+                    />
+                  </Field>
+                  <Field>
+                    <FieldLabel htmlFor="cue-end">
+                      {m.workspace_end()}
+                    </FieldLabel>
+                    <Input
+                      id="cue-end"
+                      value={draft?.end ?? formatTimestamp(cue.end_ms)}
+                      disabled={!document || saving}
+                      onChange={(event) =>
+                        onDraftChange({ end: event.target.value })
+                      }
+                    />
+                  </Field>
+                </div>
                 <Field>
-                  <FieldLabel htmlFor="cue-start">Start</FieldLabel>
-                  <Input
-                    id="cue-start"
-                    value={draft?.start ?? formatTimestamp(cue.start_ms)}
+                  <FieldLabel>{m.workspace_position()}</FieldLabel>
+                  <PositionGrid
+                    value={draft?.position ?? cue.position}
                     disabled={!document || saving}
-                    onChange={(event) =>
-                      onDraftChange({ start: event.target.value })
-                    }
+                    onValueChange={(position) => onDraftChange({ position })}
                   />
                 </Field>
-                <Field>
-                  <FieldLabel htmlFor="cue-end">End</FieldLabel>
-                  <Input
-                    id="cue-end"
-                    value={draft?.end ?? formatTimestamp(cue.end_ms)}
-                    disabled={!document || saving}
-                    onChange={(event) =>
-                      onDraftChange({ end: event.target.value })
-                    }
-                  />
-                </Field>
-              </div>
-              <Field>
-                <FieldLabel>Position</FieldLabel>
-                <PositionGrid
-                  value={draft?.position ?? cue.position}
-                  disabled={!document || saving}
-                  onValueChange={(position) => onDraftChange({ position })}
-                />
-              </Field>
-            </section>
-          </div>
-        </ScrollArea>
-      ) : (
-        <Empty className="border-0 p-6">
-          <EmptyHeader>
-            <EmptyTitle>No Cue Selected</EmptyTitle>
-            <EmptyDescription>
-              Choose a cue to edit content, timing, position, and style.
-            </EmptyDescription>
-          </EmptyHeader>
-        </Empty>
-      )}
+              </section>
+            </div>
+          ) : (
+            <Empty className="border-0 p-6">
+              <EmptyHeader>
+                <EmptyTitle>{m.workspace_no_cue_selected()}</EmptyTitle>
+                <EmptyDescription>
+                  {m.workspace_no_cue_description()}
+                </EmptyDescription>
+              </EmptyHeader>
+            </Empty>
+          )}
+        </div>
+      </ScrollArea>
     </aside>
   )
 }

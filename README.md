@@ -50,23 +50,25 @@ Blu-ray backup  ──▶  PGS extraction  ──▶  LLM OCR  ──▶  human 
   presentation set to a PNG cue with exact timing and canvas geometry, and
   publishes cues to the UI incrementally so you can start reviewing before
   extraction finishes.
-- **LLM OCR with verification.** A three-pass pipeline recognizes main text, then
-  ruby annotations, then italic ranges — each pass schema-validated with bounded
+- **LLM OCR with verification.** A two-phase pipeline recognizes main text and
+  ruby annotations together, then conservatively classifies whole-Cue italics
+  and clear non-white text color. Both phases are schema-validated with bounded
   corrective retries. Before the first request, a foreground-pixel projection
   estimates how many large glyph rows the bitmap actually contains, and a
   response whose line count disagrees is rejected. That single check kills the
   most common silent failure: a syntactically perfect one-line answer for a
   two-line cue.
 - **A real editor.** Selection-based bold, italic, underline, strikethrough,
-  superscript, and subscript. Ruby (furigana) creation with over/under placement.
+  superscript, subscript, and font color. Ruby (furigana) creation with over/under placement.
   Timing editing and direct 3×3 position selection. Side-by-side rendering of the
   source bitmap and your structured subtitle in one shared canvas coordinate
   system, so position and scale are actually comparable.
 - **Translation.** Translate a cue or a whole track into a target language,
   preserving timing and semantic position. Use **Save As** first to keep the
   source language as its own project.
-- **Review workflow.** Append-only revision history, revision-based undo/redo,
-  explicit approval, and automatic invalidation when new evidence arrives.
+- **Review workflow.** Viewable Cue revision history with restore and guarded
+  deletion, revision-based undo/redo, explicit approval, and automatic
+  invalidation when new evidence arrives.
 - **Export.** Canonical JSON that retains geometry, ruby, per-span styles, review
   status, and OCR provenance — plus derived SRT with portable `<b>`/`<i>`/`<u>`
   markup and explicit warnings for everything SRT cannot represent.
@@ -84,9 +86,11 @@ cue assets. You choose which model provider sees your images:
 | **OpenAI API** | Remote | Cue images leave your machine |
 | **Anthropic API** | Remote | Cue images leave your machine |
 
-OCR, validation, and translation are configured as three independent profiles, so
-you can run recognition on a large local vision model and validation on something
-cheaper — or vice versa. API keys live in renderer memory for the session only;
+OCR, validation, and translation are configured as three independent profiles.
+OCR drives Phase 1 character and ruby recognition; validation drives Phase 2
+italic and color recognition; translation runs afterward on text. You can use a
+large local vision model for Phase 1 and something cheaper for Phase 2 — or vice
+versa. API keys live in renderer memory for the session only;
 they are never written to the project package, preferences, logs, or exports.
 
 ## Status
@@ -233,10 +237,13 @@ RosettaCue/
 │   ├── export/           Canonical document assembly, JSON and SRT writers
 │   └── core/             Application use-case orchestration
 ├── electron/             Main process, sandboxed preload, IPC contracts, sidecar client
+├── messages/             Paraglide source message catalogs (English only for now)
+├── project.inlang/       Paraglide/Inlang locale and message-format configuration
 ├── src/                  React renderer
 │   ├── components/ui/    shadcn-managed component source
 │   ├── features/         welcome, projects, settings, workspace
 │   ├── lib/              renderer adapters and helpers
+│   ├── paraglide/         Generated, git-ignored type-safe message runtime
 │   └── types/            preload bridge declarations
 ├── docs/                 Architecture and full system specification
 ├── build/                Desktop package icons
@@ -251,6 +258,12 @@ corepack pnpm lint        # renderer and Electron static analysis
 corepack pnpm test        # Vitest + the full Rust workspace test suite
 corepack pnpm format      # Prettier
 ```
+
+Renderer strings use Paraglide JS. English is the only configured locale and
+`messages/en.json` is the source catalog. Vite regenerates the git-ignored
+`src/paraglide/` runtime during development and builds; run
+`corepack pnpm i18n:compile` directly after changing locale configuration when
+you want to refresh its generated types immediately.
 
 Rust tests cover domain classification, PGS parsing and decoding, exact project
 schema validation and transactions, OCR normalization, provider request formats,

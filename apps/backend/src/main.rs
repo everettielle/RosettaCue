@@ -430,6 +430,14 @@ fn dispatch(
                 params.revision_id,
             ))
         }
+        "delete_cue_revision" => {
+            let params: RestoreCueRevisionParams = parse(value)?;
+            serialize_result(app.delete_cue_revision(
+                params.project_path,
+                params.cue_id,
+                params.revision_id,
+            ))
+        }
         "review_cue" => {
             let params: ReviewCueParams = parse(value)?;
             serialize_result(app.review_cue(

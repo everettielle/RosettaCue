@@ -59,20 +59,15 @@ pub struct ProviderOcrBackend {
 }
 
 #[derive(Debug, Deserialize)]
-struct MainResponse {
+struct RecognitionResponse {
     lines: Vec<TextValue>,
+    annotations: Vec<RawAnnotation>,
     unreadable: bool,
 }
 
 #[derive(Debug, Deserialize)]
 struct TextValue {
     text: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct AnnotationResponse {
-    annotations: Vec<RawAnnotation>,
-    unreadable: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -96,6 +91,7 @@ struct ValidatedAnnotation {
 #[derive(Debug, Deserialize)]
 struct StyleResponse {
     italic: bool,
+    color: String,
 }
 
 impl ProviderOcrBackend {
@@ -179,27 +175,23 @@ impl OcrBackend for ProviderOcrBackend {
         let image = std::fs::read(&request.image_path)?;
         let expected_main_rows = estimate_main_rows(&image);
         let image_base64 = BASE64.encode(image);
-        let (main, main_response, _) = Self::run_stage(
+        let (recognition, recognition_response, _) = Self::run_stage(
             &self.recognition_client,
             &image_base64,
-            "main-text",
-            &prompt::main_text(language, expected_main_rows),
-            &main_schema(),
-            |content| validate_main(content, expected_main_rows, language),
+            "recognition",
+            &prompt::recognition(language, expected_main_rows),
+            &recognition_schema(),
+            |content| validate_recognition(content, expected_main_rows, language),
         )?;
-        let main_lines = main
+        let main_lines = recognition
             .lines
             .iter()
-            .map(|line| line.text.clone())
-            .collect::<Vec<_>>();
-        let (annotations, annotation_response, _) = Self::run_stage(
-            &self.validation_client,
-            &image_base64,
-            "annotation",
-            &prompt::annotations(language, &main_lines),
-            &annotation_schema(),
-            |content| validate_annotations(content, &main_lines, language),
-        )?;
+            .map(|line| {
+                language
+                    .normalize(&line.text)
+                    .map(|(normalized, _)| normalized)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let (style, style_response, _) = Self::run_stage(
             &self.validation_client,
             &image_base64,
@@ -208,20 +200,19 @@ impl OcrBackend for ProviderOcrBackend {
             &style_schema(),
             validate_whole_cue_style,
         )?;
-        let unreadable = main.unreadable || annotations.unreadable;
-        let (lines, normalizations) = assemble_lines(main, annotations, style.italic, language)?;
-        let model = style_response
+        let unreadable = recognition.unreadable;
+        let color = recognized_color(&style.color)?;
+        let (lines, normalizations) =
+            assemble_lines(recognition, style.italic, color.as_deref(), language)?;
+        let model = recognition_response
             .model
             .clone()
-            .or_else(|| annotation_response.model.clone())
-            .or_else(|| main_response.model.clone())
             .unwrap_or_else(|| self.config.recognition.model.clone());
         let raw_response = serde_json::to_string(&json!({
-            "main_text": parse_json_content(&main_response.content)?,
-            "annotations": parse_json_content(&annotation_response.content)?,
+            "recognition": parse_json_content(&recognition_response.content)?,
             "style": parse_json_content(&style_response.content)?,
             "row_estimate": expected_main_rows,
-            "usage": [main_response.usage, annotation_response.usage, style_response.usage],
+            "usage": [recognition_response.usage, style_response.usage],
             "providers": {
                 "recognition": self.config.recognition.redacted(),
                 "validation": self.config.validation.redacted()
@@ -293,12 +284,12 @@ fn parse_json_content(content: &str) -> Result<Value, OcrError> {
         .map_err(|_| OcrError::Validation("model did not return valid JSON".to_owned()))
 }
 
-fn validate_main(
+fn validate_recognition(
     content: &str,
     expected_main_rows: Option<usize>,
     language: &LanguagePreset,
-) -> Result<MainResponse, OcrError> {
-    let mut response = serde_json::from_value::<MainResponse>(parse_json_content(content)?)?;
+) -> Result<RecognitionResponse, OcrError> {
+    let response = serde_json::from_value::<RecognitionResponse>(parse_json_content(content)?)?;
     if response.lines.is_empty() {
         return Err(OcrError::Validation("main text has no lines".to_owned()));
     }
@@ -310,23 +301,15 @@ fn validate_main(
             response.lines.len()
         )));
     }
-    for line in &mut response.lines {
+    let mut main_lines = Vec::with_capacity(response.lines.len());
+    for line in &response.lines {
         let (normalized, _) = language.normalize(&line.text)?;
         if normalized.is_empty() {
             return Err(OcrError::Validation("main text line is empty".to_owned()));
         }
-        line.text = normalized;
+        main_lines.push(normalized);
     }
-    Ok(response)
-}
-
-fn validate_annotations(
-    content: &str,
-    main_lines: &[String],
-    language: &LanguagePreset,
-) -> Result<AnnotationResponse, OcrError> {
-    let mut response = serde_json::from_value::<AnnotationResponse>(parse_json_content(content)?)?;
-    for annotation in &mut response.annotations {
+    for annotation in &response.annotations {
         if annotation.line_index == 0
             || usize::try_from(annotation.line_index).map_or(true, |index| index > main_lines.len())
             || annotation.base_occurrence == 0
@@ -336,14 +319,18 @@ fn validate_annotations(
                 "annotation placement is invalid".to_owned(),
             ));
         }
-        annotation.text = language.normalize(&annotation.text)?.0;
-        annotation.base = language.normalize(&annotation.base)?.0;
+        let annotation_text = language.normalize(&annotation.text)?.0;
+        let annotation_base = language.normalize(&annotation.base)?.0;
+        if annotation_text.is_empty() || annotation_base.is_empty() {
+            return Err(OcrError::Validation(
+                "annotation text and base must not be empty".to_owned(),
+            ));
+        }
         let line = &main_lines[usize::try_from(annotation.line_index - 1)
             .map_err(|_| OcrError::Validation("line index is too large".to_owned()))?];
-        if find_occurrence(line, &annotation.base, annotation.base_occurrence).is_none() {
+        if find_occurrence(line, &annotation_base, annotation.base_occurrence).is_none() {
             return Err(OcrError::Validation(format!(
-                "annotation base was not found: {}",
-                annotation.base
+                "annotation base was not found: {annotation_base}"
             )));
         }
     }
@@ -351,18 +338,40 @@ fn validate_annotations(
 }
 
 fn validate_whole_cue_style(content: &str) -> Result<StyleResponse, OcrError> {
-    Ok(serde_json::from_value(parse_json_content(content)?)?)
+    let response = serde_json::from_value::<StyleResponse>(parse_json_content(content)?)?;
+    recognized_color(&response.color)?;
+    Ok(response)
+}
+
+fn recognized_color(value: &str) -> Result<Option<String>, OcrError> {
+    let color = match value {
+        "default" => None,
+        "black" => Some("#000000"),
+        "red" => Some("#FF0000"),
+        "orange" => Some("#FF8000"),
+        "yellow" => Some("#FFFF00"),
+        "green" => Some("#00FF00"),
+        "cyan" => Some("#00FFFF"),
+        "blue" => Some("#0000FF"),
+        "magenta" => Some("#FF00FF"),
+        other => {
+            return Err(OcrError::Validation(format!(
+                "unsupported recognized text color: {other}"
+            )));
+        }
+    };
+    Ok(color.map(str::to_owned))
 }
 
 fn assemble_lines(
-    main: MainResponse,
-    annotations: AnnotationResponse,
+    recognition: RecognitionResponse,
     italic: bool,
+    color: Option<&str>,
     language: &LanguagePreset,
 ) -> Result<(Vec<OcrLine>, Vec<NormalizationRecord>), OcrError> {
     let mut records = Vec::new();
     let mut by_line: HashMap<u32, Vec<ValidatedAnnotation>> = HashMap::new();
-    for (annotation_index, annotation) in annotations.annotations.into_iter().enumerate() {
+    for (annotation_index, annotation) in recognition.annotations.into_iter().enumerate() {
         let (text, text_events) = language.normalize(&annotation.text)?;
         let (base, base_events) = language.normalize(&annotation.base)?;
         add_records(
@@ -394,8 +403,8 @@ fn assemble_lines(
                 },
             });
     }
-    let mut lines = Vec::with_capacity(main.lines.len());
-    for (line_offset, raw_line) in main.lines.into_iter().enumerate() {
+    let mut lines = Vec::with_capacity(recognition.lines.len());
+    for (line_offset, raw_line) in recognition.lines.into_iter().enumerate() {
         let line_index = u32::try_from(line_offset + 1)
             .map_err(|_| OcrError::Validation("too many OCR lines".to_owned()))?;
         let (text, events) = language.normalize(&raw_line.text)?;
@@ -404,6 +413,7 @@ fn assemble_lines(
             &text,
             by_line.remove(&line_index).unwrap_or_default(),
             italic,
+            color,
         )?;
         lines.push(OcrLine { text, spans });
     }
@@ -414,6 +424,7 @@ fn assemble_spans(
     text: &str,
     annotations: Vec<ValidatedAnnotation>,
     italic: bool,
+    color: Option<&str>,
 ) -> Result<Vec<OcrSpan>, OcrError> {
     let styles = if italic {
         vec![TextStyle::Italic]
@@ -447,12 +458,14 @@ fn assemble_spans(
             spans.push(OcrSpan::Text {
                 text: text[cursor..start].to_owned(),
                 styles: styles.clone(),
+                color: color.map(str::to_owned),
             });
         }
         spans.push(OcrSpan::Ruby {
             base: text[start..end].to_owned(),
             annotations,
             styles: styles.clone(),
+            color: color.map(str::to_owned),
         });
         cursor = end;
     }
@@ -460,12 +473,14 @@ fn assemble_spans(
         spans.push(OcrSpan::Text {
             text: text[cursor..].to_owned(),
             styles: styles.clone(),
+            color: color.map(str::to_owned),
         });
     }
     if spans.is_empty() {
         spans.push(OcrSpan::Text {
             text: text.to_owned(),
             styles,
+            color: color.map(str::to_owned),
         });
     }
     Ok(spans)
@@ -497,16 +512,12 @@ fn add_records(
     }));
 }
 
-fn main_schema() -> Value {
-    json!({ "type": "json_schema", "json_schema": { "name": "subtitle_main_text", "strict": true, "schema": { "type": "object", "properties": { "lines": { "type": "array", "minItems": 1, "items": { "type": "object", "properties": { "text": { "type": "string" } }, "required": ["text"], "additionalProperties": false } }, "unreadable": { "type": "boolean" } }, "required": ["lines", "unreadable"], "additionalProperties": false } } })
-}
-
-fn annotation_schema() -> Value {
-    json!({ "type": "json_schema", "json_schema": { "name": "subtitle_annotations", "strict": true, "schema": { "type": "object", "properties": { "annotations": { "type": "array", "items": { "type": "object", "properties": { "line_index": { "type": "integer", "minimum": 1 }, "text": { "type": "string" }, "base": { "type": "string" }, "base_occurrence": { "type": "integer", "minimum": 1 }, "position": { "enum": ["over", "under"] } }, "required": ["line_index", "text", "base", "base_occurrence", "position"], "additionalProperties": false } }, "unreadable": { "type": "boolean" } }, "required": ["annotations", "unreadable"], "additionalProperties": false } } })
+fn recognition_schema() -> Value {
+    json!({ "type": "json_schema", "json_schema": { "name": "subtitle_character_recognition", "strict": true, "schema": { "type": "object", "properties": { "lines": { "type": "array", "minItems": 1, "items": { "type": "object", "properties": { "text": { "type": "string" } }, "required": ["text"], "additionalProperties": false } }, "annotations": { "type": "array", "items": { "type": "object", "properties": { "line_index": { "type": "integer", "minimum": 1 }, "text": { "type": "string" }, "base": { "type": "string" }, "base_occurrence": { "type": "integer", "minimum": 1 }, "position": { "enum": ["over", "under"] } }, "required": ["line_index", "text", "base", "base_occurrence", "position"], "additionalProperties": false } }, "unreadable": { "type": "boolean" } }, "required": ["lines", "annotations", "unreadable"], "additionalProperties": false } } })
 }
 
 fn style_schema() -> Value {
-    json!({ "type": "json_schema", "json_schema": { "name": "subtitle_whole_cue_style", "strict": true, "schema": { "type": "object", "properties": { "italic": { "type": "boolean" } }, "required": ["italic"], "additionalProperties": false } } })
+    json!({ "type": "json_schema", "json_schema": { "name": "subtitle_whole_cue_style", "strict": true, "schema": { "type": "object", "properties": { "italic": { "type": "boolean" }, "color": { "enum": ["default", "black", "red", "orange", "yellow", "green", "cyan", "blue", "magenta"] } }, "required": ["italic", "color"], "additionalProperties": false } } })
 }
 
 #[cfg(test)]
@@ -516,20 +527,14 @@ mod tests {
     #[test]
     fn validates_and_assembles_ruby() {
         let language = languages::resolve("jpn").expect("Japanese preset");
-        let main = validate_main(
-            r#"{"lines":[{"text":"司る"}],"unreadable":false}"#,
+        let recognition = validate_recognition(
+            r#"{"lines":[{"text":"司る"}],"annotations":[{"line_index":1,"text":"つかさど","base":"司","base_occurrence":1,"position":"over"}],"unreadable":false}"#,
             Some(1),
             language,
         )
-        .expect("main response");
-        let annotations = validate_annotations(
-            r#"{"annotations":[{"line_index":1,"text":"つかさど","base":"司","base_occurrence":1,"position":"over"}],"unreadable":false}"#,
-            &["司る".to_owned()],
-            language,
-        )
-        .expect("annotation response");
+        .expect("recognition response");
         let (lines, _) =
-            assemble_lines(main, annotations, false, language).expect("assemble lines");
+            assemble_lines(recognition, false, None, language).expect("assemble lines");
         assert_eq!(lines[0].text, "司る");
         assert!(matches!(lines[0].spans[0], OcrSpan::Ruby { .. }));
     }
@@ -537,8 +542,8 @@ mod tests {
     #[test]
     fn rejects_a_main_response_that_omits_a_detected_row() {
         let language = languages::resolve("eng").expect("English preset");
-        let error = validate_main(
-            r#"{"lines":[{"text":"first"}],"unreadable":false}"#,
+        let error = validate_recognition(
+            r#"{"lines":[{"text":"first"}],"annotations":[],"unreadable":false}"#,
             Some(2),
             language,
         )
@@ -549,21 +554,16 @@ mod tests {
     #[test]
     fn applies_whole_cue_italic_to_text_and_ruby_spans() {
         let language = languages::resolve("jpn").expect("Japanese preset");
-        let main = validate_main(
-            r#"{"lines":[{"text":"Uは 司る人"}],"unreadable":false}"#,
+        let recognition = validate_recognition(
+            r#"{"lines":[{"text":"Uは 司る人"}],"annotations":[{"line_index":1,"text":"つかさど","base":"司","base_occurrence":1,"position":"over"}],"unreadable":false}"#,
             Some(1),
             language,
         )
-        .expect("main response");
-        let annotations = validate_annotations(
-            r#"{"annotations":[{"line_index":1,"text":"つかさど","base":"司","base_occurrence":1,"position":"over"}],"unreadable":false}"#,
-            &["Uは 司る人".to_owned()],
-            language,
-        )
-        .expect("annotations");
-        let style = validate_whole_cue_style(r#"{"italic":true}"#).expect("whole cue style");
+        .expect("recognition response");
+        let style = validate_whole_cue_style(r#"{"italic":true,"color":"default"}"#)
+            .expect("whole cue style");
         let (lines, _) =
-            assemble_lines(main, annotations, style.italic, language).expect("assembled line");
+            assemble_lines(recognition, style.italic, None, language).expect("assembled line");
         assert!(matches!(
             &lines[0].spans[0],
             OcrSpan::Text { styles, .. } if styles == &[TextStyle::Italic]
@@ -576,5 +576,23 @@ mod tests {
             &lines[0].spans[2],
             OcrSpan::Text { styles, .. } if styles == &[TextStyle::Italic]
         ));
+    }
+
+    #[test]
+    fn stores_a_clear_non_white_color_on_every_span() {
+        let language = languages::resolve("eng").expect("English preset");
+        let recognition = validate_recognition(
+            r#"{"lines":[{"text":"Alert"}],"annotations":[],"unreadable":false}"#,
+            Some(1),
+            language,
+        )
+        .expect("recognition response");
+        let style =
+            validate_whole_cue_style(r#"{"italic":false,"color":"red"}"#).expect("whole cue style");
+        let color = recognized_color(&style.color).expect("known color");
+        let (lines, _) = assemble_lines(recognition, style.italic, color.as_deref(), language)
+            .expect("assembled line");
+
+        assert_eq!(lines[0].spans[0].color(), Some("#FF0000"));
     }
 }

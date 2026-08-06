@@ -1,4 +1,5 @@
 import type { LlmProvider, ProviderConfig } from "@/features/projects/types"
+import * as m from "@/paraglide/messages.js"
 
 const STORAGE_KEY = "rosettacue.workspace-settings.v1"
 
@@ -103,16 +104,18 @@ export function saveWorkspaceSettings(settings: WorkspaceSettings) {
 
 export function validateProviderConfig(config: ProviderConfig) {
   if (!config.base_url.trim()) {
-    return "Enter a provider base URL."
+    return m.provider_base_url_required()
   }
   if (!config.model.trim()) {
-    return "Choose a model in Settings before starting this task."
+    return m.provider_model_required()
   }
   if (
     (config.provider === "open_ai" || config.provider === "anthropic") &&
     !config.api_key?.trim()
   ) {
-    return `${config.provider === "open_ai" ? "OpenAI" : "Anthropic"} requires an API key for this session.`
+    return m.provider_api_key_required({
+      provider: config.provider === "open_ai" ? "OpenAI" : "Anthropic",
+    })
   }
   return null
 }

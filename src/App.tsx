@@ -14,6 +14,7 @@ import { WelcomeScreen } from "@/features/welcome/welcome-screen"
 import { ProjectWorkspace } from "@/features/workspace/project-workspace"
 import { desktop } from "@/lib/desktop"
 import { projectNameError } from "@/lib/project-name"
+import * as m from "@/paraglide/messages.js"
 
 function App() {
   const [backendInfo, setBackendInfo] = React.useState<BackendInfo | null>(null)
@@ -95,7 +96,7 @@ function App() {
   const chooseProjectParent = async () => {
     try {
       const path = await desktop.dialogs.selectDirectory({
-        title: "Choose where to save the project",
+        title: m.create_choose_location(),
         defaultPath: projectParent || undefined,
       })
       if (path) {
@@ -114,7 +115,7 @@ function App() {
       return
     }
     if (!projectParent) {
-      setCreateError("Choose a folder for the project.")
+      setCreateError(m.create_choose_folder_error())
       return
     }
 

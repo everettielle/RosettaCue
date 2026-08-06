@@ -20,6 +20,7 @@ import {
 import { Input } from "@/components/ui/input"
 import { Spinner } from "@/components/ui/spinner"
 import { projectNameError } from "@/lib/project-name"
+import * as m from "@/paraglide/messages.js"
 
 export function CreateProjectDialog({
   open,
@@ -49,29 +50,26 @@ export function CreateProjectDialog({
       <DialogContent>
         <form className="flex flex-col gap-6" onSubmit={onSubmit}>
           <DialogHeader>
-            <DialogTitle>Create a new project</DialogTitle>
-            <DialogDescription>
-              A .rosettacue package keeps source metadata, cue images, OCR, and
-              edits together.
-            </DialogDescription>
+            <DialogTitle>{m.create_title()}</DialogTitle>
+            <DialogDescription>{m.create_description()}</DialogDescription>
           </DialogHeader>
           <FieldGroup>
             <Field data-invalid={invalidName || undefined}>
-              <FieldLabel htmlFor="project-name">Project name</FieldLabel>
+              <FieldLabel htmlFor="project-name">
+                {m.field_project_name()}
+              </FieldLabel>
               <Input
                 id="project-name"
                 value={name}
                 autoFocus
                 aria-invalid={invalidName || undefined}
-                placeholder="Film title"
+                placeholder={m.create_name_placeholder()}
                 onChange={(event) => onNameChange(event.target.value)}
               />
-              <FieldDescription>
-                Use the film or disc name. The package uses the same name.
-              </FieldDescription>
+              <FieldDescription>{m.create_name_description()}</FieldDescription>
             </Field>
             <Field data-invalid={!parent && Boolean(error) ? true : undefined}>
-              <FieldLabel>Project location</FieldLabel>
+              <FieldLabel>{m.field_project_location()}</FieldLabel>
               <Button
                 type="button"
                 variant="outline"
@@ -79,10 +77,10 @@ export function CreateProjectDialog({
                 disabled={busy}
               >
                 <FolderOpenIcon data-icon="inline-start" />
-                {parent ? "Change folder" : "Choose folder"}
+                {parent ? m.create_change_folder() : m.common_choose_folder()}
               </Button>
               <FieldDescription>
-                {parent || "No folder selected"}
+                {parent || m.create_no_folder()}
               </FieldDescription>
             </Field>
             <FieldError>{error}</FieldError>
@@ -94,7 +92,7 @@ export function CreateProjectDialog({
               onClick={() => onOpenChange(false)}
               disabled={busy}
             >
-              Cancel
+              {m.common_cancel()}
             </Button>
             <Button type="submit" disabled={busy}>
               {busy ? (
@@ -102,7 +100,7 @@ export function CreateProjectDialog({
               ) : (
                 <PlusIcon data-icon="inline-start" />
               )}
-              Create project
+              {m.create_project()}
             </Button>
           </DialogFooter>
         </form>

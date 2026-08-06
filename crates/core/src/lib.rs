@@ -332,6 +332,23 @@ impl Application {
         Ok(store.save_cue_revision(cue_id, &revision.document)?)
     }
 
+    /// Deletes one historical Cue revision and returns the remaining timeline.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the revision is missing, it is the only remaining
+    /// revision, or the project transaction fails.
+    pub fn delete_cue_revision(
+        self,
+        project_path: impl AsRef<Path>,
+        cue_id: Uuid,
+        revision_id: Uuid,
+    ) -> Result<Vec<CueRevision>, ProjectError> {
+        let store = ProjectStore::open(project_path)?;
+        store.delete_cue_revision(cue_id, revision_id)?;
+        store.cue_revision_history(cue_id)
+    }
+
     /// Records a human review decision for the latest effective cue revision.
     ///
     /// # Errors
@@ -1174,6 +1191,15 @@ fn validate_cue_edit(document: &CueEditDocument) -> Result<(), CueEditError> {
         let mut composed = String::new();
         for span in &line.spans {
             let styles = span.styles();
+            if span
+                .color()
+                .is_some_and(|color| !is_valid_text_color(color))
+            {
+                return Err(CueEditError::Invalid(format!(
+                    "subtitle line {} contains an invalid text color",
+                    line_index + 1
+                )));
+            }
             if styles
                 .iter()
                 .enumerate()
@@ -1220,6 +1246,12 @@ fn validate_cue_edit(document: &CueEditDocument) -> Result<(), CueEditError> {
         }
     }
     Ok(())
+}
+
+fn is_valid_text_color(color: &str) -> bool {
+    color.len() == 7
+        && color.starts_with('#')
+        && color[1..].bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn decode_track(
@@ -1429,6 +1461,7 @@ mod tests {
                             position: RubyPosition::Over,
                         }],
                         styles: vec![TextStyle::Italic],
+                        color: None,
                     }],
                 }],
                 normalizations: Vec::new(),
@@ -1458,6 +1491,7 @@ mod tests {
         conflicting_baseline.subtitle.lines[0].spans[0] = OcrSpan::Text {
             text: "物語".to_owned(),
             styles: vec![TextStyle::Superscript, TextStyle::Subscript],
+            color: None,
         };
         assert!(matches!(
             validate_cue_edit(&conflicting_baseline),
@@ -1468,10 +1502,18 @@ mod tests {
         duplicate_style.subtitle.lines[0].spans[0] = OcrSpan::Text {
             text: "物語".to_owned(),
             styles: vec![TextStyle::Italic, TextStyle::Italic],
+            color: None,
         };
         assert!(matches!(
             validate_cue_edit(&duplicate_style),
             Err(CueEditError::Invalid(message)) if message.contains("duplicate text styles")
+        ));
+
+        let mut invalid_color = valid_edit();
+        *invalid_color.subtitle.lines[0].spans[0].color_mut() = Some("tomato".to_owned());
+        assert!(matches!(
+            validate_cue_edit(&invalid_color),
+            Err(CueEditError::Invalid(message)) if message.contains("invalid text color")
         ));
     }
 }

@@ -1,3 +1,5 @@
+import * as m from "@/paraglide/messages.js"
+
 const INVALID_PROJECT_CHARACTER = /[\\/:*?"<>|]/u
 
 function containsControlCharacter(value: string) {
@@ -7,10 +9,10 @@ function containsControlCharacter(value: string) {
 export function projectNameError(value: string) {
   const name = value.trim()
   if (!name) {
-    return "Enter a project name."
+    return m.project_name_required()
   }
   if (INVALID_PROJECT_CHARACTER.test(name) || containsControlCharacter(name)) {
-    return "Project names cannot contain path separators or reserved characters."
+    return m.project_name_invalid()
   }
   return null
 }

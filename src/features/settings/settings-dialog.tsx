@@ -54,6 +54,7 @@ import {
 } from "@/features/settings/model-settings"
 import { desktop } from "@/lib/desktop"
 import { cn } from "@/lib/utils"
+import * as m from "@/paraglide/messages.js"
 
 type Section = "general" | "project" | "models"
 type Appearance = "system" | "light" | "dark"
@@ -63,9 +64,9 @@ const sections: Array<{
   label: string
   icon: typeof MonitorCogIcon
 }> = [
-  { value: "general", label: "General", icon: MonitorCogIcon },
-  { value: "project", label: "Project", icon: FilmIcon },
-  { value: "models", label: "Models", icon: ActivityIcon },
+  { value: "general", label: m.settings_general(), icon: MonitorCogIcon },
+  { value: "project", label: m.settings_project(), icon: FilmIcon },
+  { value: "models", label: m.settings_models(), icon: ActivityIcon },
 ]
 
 const providers: Array<{ value: LlmProvider; label: string }> = [
@@ -76,20 +77,41 @@ const providers: Array<{ value: LlmProvider; label: string }> = [
 ]
 
 const tasks: Array<{ value: ModelTask; label: string }> = [
-  { value: "ocr", label: "OCR" },
-  { value: "validation", label: "Validation" },
-  { value: "translation", label: "Translation" },
+  { value: "ocr", label: m.settings_task_ocr() },
+  { value: "validation", label: m.settings_task_validation() },
+  { value: "translation", label: m.settings_task_translation() },
 ]
 
+function taskHelp(task: ModelTask) {
+  const help: Record<
+    ModelTask,
+    { phase: () => string; description: () => string }
+  > = {
+    ocr: {
+      phase: m.settings_phase_1,
+      description: m.settings_task_ocr_description,
+    },
+    validation: {
+      phase: m.settings_phase_2,
+      description: m.settings_task_validation_description,
+    },
+    translation: {
+      phase: m.settings_post_ocr,
+      description: m.settings_task_translation_description,
+    },
+  }
+  return help[task]
+}
+
 const languageItems = [
-  { value: "eng", label: "English (eng)" },
-  { value: "fra", label: "Français (fra)" },
-  { value: "deu", label: "Deutsch (deu)" },
-  { value: "ita", label: "Italiano (ita)" },
-  { value: "zho", label: "中文 (zho)" },
-  { value: "jpn", label: "日本語 (jpn)" },
-  { value: "kor", label: "한국어 (kor)" },
-  { value: "spa", label: "Español (spa)" },
+  { value: "zho", label: m.language_chinese() },
+  { value: "eng", label: m.language_english() },
+  { value: "fra", label: m.language_french() },
+  { value: "deu", label: m.language_german() },
+  { value: "ita", label: m.language_italian() },
+  { value: "jpn", label: m.language_japanese() },
+  { value: "kor", label: m.language_korean() },
+  { value: "spa", label: m.language_spanish() },
 ]
 
 const appearanceItems: Array<{
@@ -97,10 +119,23 @@ const appearanceItems: Array<{
   label: string
   icon: typeof MonitorIcon
 }> = [
-  { value: "system", label: "System", icon: MonitorIcon },
-  { value: "light", label: "Light", icon: SunIcon },
-  { value: "dark", label: "Dark", icon: MoonIcon },
+  { value: "system", label: m.settings_theme_system(), icon: MonitorIcon },
+  { value: "light", label: m.settings_theme_light(), icon: SunIcon },
+  { value: "dark", label: m.settings_theme_dark(), icon: MoonIcon },
 ]
+
+function mediaToolOriginLabel(origin: MediaToolDiagnostic["origin"]) {
+  const labels: Record<
+    NonNullable<MediaToolDiagnostic["origin"]>,
+    () => string
+  > = {
+    configured: m.settings_media_tools_origin_configured,
+    bundled: m.settings_media_tools_origin_bundled,
+    path: m.settings_media_tools_origin_path,
+    system: m.settings_media_tools_origin_system,
+  }
+  return origin ? labels[origin]() : m.common_missing()
+}
 
 export function SettingsDialog({
   open,
@@ -234,11 +269,8 @@ export function SettingsDialog({
     <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent className="flex h-[min(720px,calc(100vh-3rem))] max-h-[calc(100vh-3rem)] flex-col gap-0 overflow-hidden p-0 sm:max-w-4xl">
         <DialogHeader className="border-b px-6 pt-6 pb-4">
-          <DialogTitle>Settings</DialogTitle>
-          <DialogDescription>
-            Configure application preferences, project languages, and task
-            models.
-          </DialogDescription>
+          <DialogTitle>{m.settings_title()}</DialogTitle>
+          <DialogDescription>{m.settings_description()}</DialogDescription>
         </DialogHeader>
 
         <div className="grid min-h-0 flex-1 grid-cols-[180px_minmax(0,1fr)]">
@@ -263,16 +295,15 @@ export function SettingsDialog({
             {section === "general" && (
               <div className="flex flex-col gap-6">
                 <div>
-                  <h3 className="font-medium">Application</h3>
+                  <h3 className="font-medium">{m.settings_application()}</h3>
                   <p className="text-sm text-muted-foreground">
-                    Appearance follows the shadcn theme tokens across every
-                    window.
+                    {m.settings_appearance_description()}
                   </p>
                 </div>
                 <Field>
-                  <FieldLabel>Appearance</FieldLabel>
+                  <FieldLabel>{m.settings_appearance()}</FieldLabel>
                   <ToggleGroup
-                    aria-label="Application appearance"
+                    aria-label={m.settings_appearance_label()}
                     value={[appearance]}
                     variant="outline"
                     spacing={0}
@@ -299,16 +330,15 @@ export function SettingsDialog({
                 </Field>
                 <Separator />
                 <div>
-                  <h3 className="font-medium">Media tools</h3>
+                  <h3 className="font-medium">{m.settings_media_tools()}</h3>
                   <p className="text-sm text-muted-foreground">
-                    Blu-ray analysis and PGS extraction use bundled or system
-                    tools.
+                    {m.settings_media_tools_description()}
                   </p>
                 </div>
                 <div className="grid gap-2">
                   {mediaTools.length === 0 ? (
                     <p className="text-sm text-muted-foreground">
-                      Checking media tools…
+                      {m.settings_media_tools_checking()}
                     </p>
                   ) : (
                     mediaTools.map((tool) => (
@@ -331,7 +361,9 @@ export function SettingsDialog({
                           </p>
                         </div>
                         <Badge variant="secondary">
-                          {tool.available ? tool.origin : "missing"}
+                          {tool.available
+                            ? mediaToolOriginLabel(tool.origin)
+                            : m.common_missing()}
                         </Badge>
                       </div>
                     ))
@@ -343,22 +375,23 @@ export function SettingsDialog({
             {section === "project" && (
               <div className="flex flex-col gap-6">
                 <div>
-                  <h3 className="font-medium">Project languages</h3>
+                  <h3 className="font-medium">
+                    {m.settings_project_languages()}
+                  </h3>
                   <p className="text-sm text-muted-foreground">
-                    These values are used as defaults for OCR and translation
-                    jobs.
+                    {m.settings_project_languages_description()}
                   </p>
                 </div>
                 <FieldGroup>
                   <LanguageField
-                    label="OCR language"
+                    label={m.settings_ocr_language()}
                     value={draft.ocr_language}
                     onChange={(ocr_language) =>
                       setDraft((current) => ({ ...current, ocr_language }))
                     }
                   />
                   <LanguageField
-                    label="Translation target"
+                    label={m.settings_translation_target()}
                     value={draft.target_language}
                     onChange={(target_language) =>
                       setDraft((current) => ({
@@ -374,10 +407,9 @@ export function SettingsDialog({
             {section === "models" && (
               <div className="flex flex-col gap-5">
                 <div>
-                  <h3 className="font-medium">Task models</h3>
+                  <h3 className="font-medium">{m.settings_task_models()}</h3>
                   <p className="text-sm text-muted-foreground">
-                    OCR, validation, and translation can use different
-                    providers. API keys stay in memory for this app session.
+                    {m.settings_task_models_description()}
                   </p>
                 </div>
                 <Tabs
@@ -403,9 +435,15 @@ export function SettingsDialog({
                     ))}
                   </TabsList>
                 </Tabs>
+                <Alert>
+                  <AlertTitle>{taskHelp(activeTask).phase()}</AlertTitle>
+                  <AlertDescription>
+                    {taskHelp(activeTask).description()}
+                  </AlertDescription>
+                </Alert>
                 <FieldGroup>
                   <Field>
-                    <FieldLabel>Provider</FieldLabel>
+                    <FieldLabel>{m.settings_provider()}</FieldLabel>
                     <Select
                       items={providers}
                       value={profile.provider}
@@ -414,7 +452,9 @@ export function SettingsDialog({
                       }
                     >
                       <SelectTrigger className="w-full">
-                        <SelectValue placeholder="Choose a provider" />
+                        <SelectValue
+                          placeholder={m.settings_choose_provider()}
+                        />
                       </SelectTrigger>
                       <SelectContent>
                         <SelectGroup>
@@ -432,7 +472,7 @@ export function SettingsDialog({
                   </Field>
                   <Field>
                     <FieldLabel htmlFor={`base-url-${activeTask}`}>
-                      Base URL
+                      {m.settings_base_url()}
                     </FieldLabel>
                     <Input
                       id={`base-url-${activeTask}`}
@@ -444,7 +484,7 @@ export function SettingsDialog({
                   </Field>
                   <Field>
                     <FieldLabel htmlFor={`api-key-${activeTask}`}>
-                      API key
+                      {m.settings_api_key()}
                     </FieldLabel>
                     <Input
                       id={`api-key-${activeTask}`}
@@ -454,22 +494,21 @@ export function SettingsDialog({
                       placeholder={
                         profile.provider === "lm_studio" ||
                         profile.provider === "ollama"
-                          ? "Optional"
-                          : "Required for this session"
+                          ? m.common_optional()
+                          : m.common_required_for_session()
                       }
                       onChange={(event) =>
                         updateProfile({ api_key: event.target.value || null })
                       }
                     />
                     <FieldDescription>
-                      Keys are not written to local preferences or project
-                      files.
+                      {m.settings_api_key_description()}
                     </FieldDescription>
                   </Field>
                   <Field>
                     <div className="flex items-center gap-2">
                       <FieldLabel htmlFor={`model-${activeTask}`}>
-                        Model
+                        {m.settings_model()}
                       </FieldLabel>
                       <Button
                         type="button"
@@ -480,7 +519,7 @@ export function SettingsDialog({
                         onClick={() => void refreshModels(false)}
                       >
                         {busy ? <Spinner /> : <RefreshCwIcon />}
-                        Refresh
+                        {m.common_refresh()}
                       </Button>
                     </div>
                     <Select
@@ -495,7 +534,9 @@ export function SettingsDialog({
                         className="w-full"
                         disabled={modelItems.length === 0}
                       >
-                        <SelectValue placeholder="Refresh models to choose" />
+                        <SelectValue
+                          placeholder={m.settings_refresh_models_placeholder()}
+                        />
                       </SelectTrigger>
                       <SelectContent alignItemWithTrigger={false}>
                         <SelectGroup>
@@ -508,8 +549,7 @@ export function SettingsDialog({
                       </SelectContent>
                     </Select>
                     <FieldDescription>
-                      Refresh to load models from this provider. A saved model
-                      remains selectable while the provider is offline.
+                      {m.settings_model_description()}
                     </FieldDescription>
                   </Field>
                 </FieldGroup>
@@ -521,12 +561,14 @@ export function SettingsDialog({
                     onClick={() => void refreshModels(true)}
                   >
                     {busy ? <Spinner /> : <ActivityIcon />}
-                    Test connection
+                    {m.settings_test_connection()}
                   </Button>
                   {diagnostic?.reachable && (
                     <p className="text-sm text-emerald-600">
-                      Connected in {diagnostic.latency_ms} ms ·{" "}
-                      {diagnostic.models.length} models
+                      {m.settings_connected({
+                        latency: diagnostic.latency_ms,
+                        count: diagnostic.models.length,
+                      })}
                     </p>
                   )}
                 </div>
@@ -535,7 +577,7 @@ export function SettingsDialog({
 
             {error && (
               <Alert variant="destructive" className="mt-5">
-                <AlertTitle>Settings check failed</AlertTitle>
+                <AlertTitle>{m.settings_check_failed()}</AlertTitle>
                 <AlertDescription>{error}</AlertDescription>
               </Alert>
             )}
@@ -544,7 +586,7 @@ export function SettingsDialog({
 
         <DialogFooter className="border-t px-6 py-4">
           <Button variant="outline" onClick={() => handleOpenChange(false)}>
-            Cancel
+            {m.common_cancel()}
           </Button>
           <Button
             onClick={() => {
@@ -553,7 +595,7 @@ export function SettingsDialog({
               onOpenChange(false)
             }}
           >
-            Save settings
+            {m.settings_save()}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -579,7 +621,7 @@ function LanguageField({
         onValueChange={(next) => onChange(String(next))}
       >
         <SelectTrigger className="w-full">
-          <SelectValue placeholder="Choose a language" />
+          <SelectValue placeholder={m.settings_choose_language()} />
         </SelectTrigger>
         <SelectContent>
           <SelectGroup>

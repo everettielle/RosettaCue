@@ -633,6 +633,54 @@ impl ProjectStore {
         rows.map(|row| parse_revision_row(&row?)).collect()
     }
 
+    /// Deletes one historical revision while keeping at least one effective revision.
+    ///
+    /// Deleting a revision invalidates the Cue's review decision. If the current
+    /// revision is deleted, the preceding revision becomes effective.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the Cue or revision is missing, it is the Cue's only
+    /// remaining revision, or the transaction fails.
+    pub fn delete_cue_revision(&self, cue_id: Uuid, revision_id: Uuid) -> Result<(), ProjectError> {
+        self.cue_edit_base(cue_id)?;
+        self.connection.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| {
+            let revision_exists: bool = self.connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM cue_revisions WHERE id = ?1 AND cue_id = ?2)",
+                params![revision_id.to_string(), cue_id.to_string()],
+                |row| row.get(0),
+            )?;
+            if !revision_exists {
+                return Err(ProjectError::RevisionNotFound);
+            }
+            let revision_count: i64 = self.connection.query_row(
+                "SELECT COUNT(*) FROM cue_revisions WHERE cue_id = ?1",
+                params![cue_id.to_string()],
+                |row| row.get(0),
+            )?;
+            if revision_count <= 1 {
+                return Err(ProjectError::LastRevision);
+            }
+            let deleted = self.connection.execute(
+                "DELETE FROM cue_revisions WHERE id = ?1 AND cue_id = ?2",
+                params![revision_id.to_string(), cue_id.to_string()],
+            )?;
+            debug_assert_eq!(deleted, 1);
+            self.connection.execute(
+                "UPDATE cues SET review_status = 'unreviewed' WHERE id = ?1",
+                params![cue_id.to_string()],
+            )?;
+            Ok::<_, ProjectError>(())
+        })();
+        if let Err(error) = result {
+            let _ = self.connection.execute_batch("ROLLBACK");
+            return Err(error);
+        }
+        self.connection.execute_batch("COMMIT")?;
+        Ok(())
+    }
+
     /// Persists a human-authored cue revision and marks it for review again.
     ///
     /// # Errors
@@ -1482,6 +1530,7 @@ mod tests {
                 spans: vec![OcrSpan::Text {
                     text: "字幕".to_owned(),
                     styles: Vec::new(),
+                    color: None,
                 }],
             }],
             normalizations: Vec::new(),
@@ -1501,6 +1550,7 @@ mod tests {
                     spans: vec![OcrSpan::Text {
                         text: "字幕です".to_owned(),
                         styles: vec![TextStyle::Italic],
+                        color: None,
                     }],
                 }],
                 ..document.clone()
@@ -1542,6 +1592,7 @@ mod tests {
         translated.subtitle.lines[0].spans = vec![OcrSpan::Text {
             text: "These are subtitles.".to_owned(),
             styles: Vec::new(),
+            color: None,
         }];
         let translation = created
             .save_translation_revision(cue.id, &translated)
@@ -1562,7 +1613,7 @@ mod tests {
             created
                 .translation_sources()
                 .expect("stable translation source"),
-            [revision]
+            std::slice::from_ref(&revision)
         );
         cue.ocr_status = OcrStatus::Succeeded;
         cue.review_status = ReviewStatus::Unreviewed;
@@ -1615,10 +1666,30 @@ mod tests {
             1
         );
         assert_eq!(reopened.tracks().expect("tracks"), [track]);
-        assert_eq!(reopened.cues().expect("cues"), [cue]);
+        assert_eq!(reopened.cues().expect("cues"), [cue.clone()]);
         assert_eq!(reopened.recognitions().expect("recognitions").len(), 1);
         assert_eq!(reopened.revisions().expect("revisions").len(), 1);
         assert_eq!(reopened.review_decisions().expect("reviews").len(), 1);
+        reopened
+            .delete_cue_revision(cue.id, translation.id)
+            .expect("delete latest translation revision");
+        assert_eq!(
+            reopened
+                .revisions()
+                .expect("human revision becomes effective"),
+            std::slice::from_ref(&revision)
+        );
+        reopened
+            .delete_cue_revision(cue.id, revision.id)
+            .expect("delete older human revision");
+        let only_revision = reopened
+            .cue_revision_history(cue.id)
+            .expect("remaining OCR revision");
+        assert_eq!(only_revision.len(), 1);
+        assert!(matches!(
+            reopened.delete_cue_revision(cue.id, only_revision[0].id),
+            Err(ProjectError::LastRevision)
+        ));
         assert!(root.join("assets/cues").is_dir());
         assert!(root.join("exports").is_dir());
     }

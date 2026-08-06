@@ -19,13 +19,15 @@ import {
 import { ScrollArea } from "@/components/ui/scroll-area"
 import type { BackendInfo, ProjectOverview } from "@/features/projects/types"
 import type { RecentProject } from "@/features/projects/recent-projects"
+import * as m from "@/paraglide/messages.js"
+import { getLocale } from "@/paraglide/runtime.js"
 
 function formatRecentDate(value: string) {
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) {
-    return "Recently opened"
+    return m.welcome_recently_opened()
   }
-  return new Intl.DateTimeFormat(undefined, {
+  return new Intl.DateTimeFormat(getLocale(), {
     dateStyle: "medium",
     timeStyle: "short",
   }).format(date)
@@ -69,10 +71,12 @@ export function WelcomeScreen({
                 RosettaCue
               </h1>
               <p className="text-sm text-muted-foreground">
-                Image subtitles, ready for review
+                {m.welcome_tagline()}
               </p>
               <p className="text-xs text-muted-foreground">
-                Version {backendInfo?.version ?? "0.1.0"}
+                {m.welcome_version({
+                  version: backendInfo?.version ?? "0.1.0",
+                })}
               </p>
             </div>
           </div>
@@ -86,7 +90,7 @@ export function WelcomeScreen({
               disabled={busy || Boolean(backendError)}
             >
               <PlusIcon data-icon="inline-start" />
-              Create a new project
+              {m.welcome_create()}
             </Button>
             <Button
               size="lg"
@@ -96,21 +100,21 @@ export function WelcomeScreen({
               disabled={busy || Boolean(backendError)}
             >
               <FolderOpenIcon data-icon="inline-start" />
-              Open an existing project
+              {m.welcome_open()}
             </Button>
           </div>
 
           {backendError && (
             <Alert variant="destructive" className="max-w-sm">
               <ServerOffIcon />
-              <AlertTitle>Core unavailable</AlertTitle>
+              <AlertTitle>{m.welcome_core_unavailable()}</AlertTitle>
               <AlertDescription>{backendError}</AlertDescription>
             </Alert>
           )}
           {projectError && (
             <Alert variant="destructive" className="max-w-sm">
               <FolderXIcon />
-              <AlertTitle>Unable to open project</AlertTitle>
+              <AlertTitle>{m.welcome_unable_open()}</AlertTitle>
               <AlertDescription>{projectError}</AlertDescription>
             </Alert>
           )}
@@ -124,9 +128,9 @@ export function WelcomeScreen({
               <EmptyMedia variant="icon">
                 <Clock3Icon />
               </EmptyMedia>
-              <EmptyTitle>No Recent Projects</EmptyTitle>
+              <EmptyTitle>{m.welcome_no_recent()}</EmptyTitle>
               <EmptyDescription>
-                Projects you create or open will appear here.
+                {m.welcome_no_recent_description()}
               </EmptyDescription>
             </EmptyHeader>
           </Empty>
@@ -134,10 +138,10 @@ export function WelcomeScreen({
           <div className="flex min-h-0 flex-1 flex-col gap-4">
             <div className="flex flex-col gap-1 px-2">
               <h2 className="font-heading text-lg font-medium">
-                Recent Projects
+                {m.welcome_recent()}
               </h2>
               <p className="text-xs text-muted-foreground">
-                Continue where you left off.
+                {m.welcome_continue()}
               </p>
             </div>
             <ScrollArea className="min-h-0 flex-1">
@@ -169,8 +173,10 @@ export function WelcomeScreen({
                       variant="ghost"
                       size="icon-sm"
                       className="mr-2 text-muted-foreground"
-                      aria-label={`Remove ${recent.name} from Recent Projects`}
-                      title="Remove from Recent Projects"
+                      aria-label={m.welcome_remove_recent_named({
+                        name: recent.name,
+                      })}
+                      title={m.welcome_remove_recent()}
                       disabled={busy}
                       onClick={() => onRemoveRecent(recent)}
                     >

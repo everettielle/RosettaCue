@@ -14,6 +14,7 @@ export const backendMethods = [
   "restore_cue_edit",
   "cue_revision_history",
   "restore_cue_revision",
+  "delete_cue_revision",
   "review_cue",
   "lmstudio_models",
   "provider_models",

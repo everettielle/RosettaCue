@@ -21,15 +21,23 @@ function sameStyles(left: TextStyle[], right: TextStyle[]) {
   )
 }
 
+export function canonicalColor(color: string | null | undefined) {
+  if (!color || !/^#[0-9a-f]{6}$/i.test(color)) return null
+  const normalized = color.toUpperCase()
+  return normalized === "#FFFFFF" ? null : normalized
+}
+
 export function appendCanonicalSpan(target: OcrSpan[], span: OcrSpan) {
   if (span.type === "text" && span.text.length === 0) return
 
+  const color = canonicalColor(span.color)
   const normalized: OcrSpan =
     span.type === "text"
       ? {
           type: "text",
           text: span.text,
           styles: canonicalStyles(span.styles),
+          ...(color ? { color } : {}),
         }
       : {
           type: "ruby",
@@ -38,12 +46,14 @@ export function appendCanonicalSpan(target: OcrSpan[], span: OcrSpan) {
             ...annotation,
           })),
           styles: canonicalStyles(span.styles),
+          ...(color ? { color } : {}),
         }
   const previous = target.at(-1)
   if (
     previous?.type === "text" &&
     normalized.type === "text" &&
-    sameStyles(previous.styles, normalized.styles)
+    sameStyles(previous.styles, normalized.styles) &&
+    canonicalColor(previous.color) === canonicalColor(normalized.color)
   ) {
     previous.text += normalized.text
     return

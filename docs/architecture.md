@@ -183,13 +183,28 @@ src/
 
 `ProjectWorkspace` loads `project_document` from Rust and derives the visible cue text from the latest human/translation revision, falling back to the latest OCR recognition. It does not read SQLite directly.
 
+### Renderer localization
+
+Renderer presentation strings use Paraglide JS with English as the base and
+only configured locale. Source messages live in `messages/en.json`; the Vite
+plugin compiles them into the git-ignored, type-safe `src/paraglide/` runtime.
+The base-locale strategy is intentional because the Electron renderer has no
+locale-bearing URL. Startup applies the active locale and text direction to the
+document root.
+
+Localization stops at the presentation boundary. Language codes, provider
+identifiers, IPC methods and events, persisted enums, and project JSON remain
+stable locale-neutral values. Native Electron UI may consume the same generated
+message functions, while Rust domain and transport errors remain structured
+protocol data rather than translated wire values.
+
 The workspace has three keyboard-accessible, resizable regions:
 
 1. Cue List: cue search, status, timestamp, and selection;
-2. Preview: side-by-side source cue image and structured subtitle rendering;
-3. Inspector: cue commands, explicitly saved content edits, timing, position, and OCR status.
+2. Preview: responsive source cue image and structured subtitle comparison that stacks when narrow;
+3. Inspector: cue commands, explicitly saved content/color edits, timing, position, OCR status, navigation, and revision history.
 
-Ribbon tabs switch the visible command group without replacing the editing surface. Inspector collapse/expand uses the imperative API provided by the shadcn Resizable wrapper. The bottom status bar reports local command state without introducing transient web-style dashboards.
+Ribbon tabs switch the visible command group without replacing the editing surface; Home duplicates the high-frequency review workflow commands. Pixel/rem constraints on the shadcn Resizable panels prevent intrinsic content overflow and keep Inspector from expanding beyond its useful content height. The bottom status bar reports local command state without introducing transient web-style dashboards.
 
 ### Renderer data flow
 

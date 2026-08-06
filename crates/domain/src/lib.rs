@@ -405,11 +405,15 @@ pub enum OcrSpan {
     Text {
         text: String,
         styles: Vec<TextStyle>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        color: Option<String>,
     },
     Ruby {
         base: String,
         annotations: Vec<RubyAnnotation>,
         styles: Vec<TextStyle>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        color: Option<String>,
     },
 }
 
@@ -424,6 +428,19 @@ impl OcrSpan {
     pub fn styles_mut(&mut self) -> &mut Vec<TextStyle> {
         match self {
             Self::Text { styles, .. } | Self::Ruby { styles, .. } => styles,
+        }
+    }
+
+    #[must_use]
+    pub fn color(&self) -> Option<&str> {
+        match self {
+            Self::Text { color, .. } | Self::Ruby { color, .. } => color.as_deref(),
+        }
+    }
+
+    pub fn color_mut(&mut self) -> &mut Option<String> {
+        match self {
+            Self::Text { color, .. } | Self::Ruby { color, .. } => color,
         }
     }
 }

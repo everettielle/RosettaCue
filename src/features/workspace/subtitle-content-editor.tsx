@@ -2,7 +2,9 @@ import * as React from "react"
 import {
   BoldIcon,
   CaptionsIcon,
+  EraserIcon,
   ItalicIcon,
+  PaletteIcon,
   StrikethroughIcon,
   SubscriptIcon,
   SuperscriptIcon,
@@ -38,11 +40,13 @@ import {
 import type { OcrLine, OcrSpan, TextStyle } from "@/features/projects/types"
 import {
   appendCanonicalSpan,
+  canonicalColor,
   canonicalStyles,
   normalizeOcrLines,
   textStyleOrder,
 } from "@/features/workspace/subtitle-spans"
 import { cn } from "@/lib/utils"
+import * as m from "@/paraglide/messages.js"
 
 type EditorCommand = {
   style: TextStyle
@@ -51,26 +55,26 @@ type EditorCommand = {
 }
 
 const editorCommands: EditorCommand[] = [
-  { style: "bold", label: "Bold", icon: BoldIcon },
-  { style: "italic", label: "Italic", icon: ItalicIcon },
+  { style: "bold", label: m.editor_bold(), icon: BoldIcon },
+  { style: "italic", label: m.editor_italic(), icon: ItalicIcon },
   {
     style: "underline",
-    label: "Underline",
+    label: m.editor_underline(),
     icon: UnderlineIcon,
   },
   {
     style: "strikethrough",
-    label: "Strikethrough",
+    label: m.editor_strikethrough(),
     icon: StrikethroughIcon,
   },
   {
     style: "superscript",
-    label: "Superscript",
+    label: m.editor_superscript(),
     icon: SuperscriptIcon,
   },
   {
     style: "subscript",
-    label: "Subscript",
+    label: m.editor_subscript(),
     icon: SubscriptIcon,
   },
 ]
@@ -107,6 +111,10 @@ function stylesForElement(element: Element, inherited: TextStyle[]) {
   return canonicalStyles(styles)
 }
 
+function colorForElement(element: Element, inherited: string | null) {
+  return canonicalColor(element.getAttribute("data-text-color")) ?? inherited
+}
+
 function textWithoutRubyAnnotations(node: Node): string {
   if (node instanceof Element && node.tagName.toLowerCase() === "rt") return ""
   return Array.from(node.childNodes)
@@ -130,12 +138,18 @@ function collectStyles(
   node.childNodes.forEach((child) => collectStyles(child, next, output))
 }
 
-function collectSpans(node: Node, inherited: TextStyle[], target: OcrSpan[]) {
+function collectSpans(
+  node: Node,
+  inherited: TextStyle[],
+  inheritedColor: string | null,
+  target: OcrSpan[]
+) {
   if (node.nodeType === Node.TEXT_NODE) {
     appendCanonicalSpan(target, {
       type: "text",
       text: (node.textContent ?? "").replaceAll("\u200B", ""),
       styles: canonicalStyles(inherited),
+      color: inheritedColor,
     })
     return
   }
@@ -144,6 +158,7 @@ function collectSpans(node: Node, inherited: TextStyle[], target: OcrSpan[]) {
   const tag = node.tagName.toLowerCase()
   if (tag === "rt" || tag === "br") return
   const nextStyles = stylesForElement(node, inherited)
+  const nextColor = colorForElement(node, inheritedColor)
   if (tag === "ruby") {
     const base = textWithoutRubyAnnotations(node).replaceAll("\u200B", "")
     const annotations = Array.from(node.querySelectorAll(":scope > rt")).map(
@@ -165,23 +180,27 @@ function collectSpans(node: Node, inherited: TextStyle[], target: OcrSpan[]) {
         base,
         annotations,
         styles: canonicalStyles(rubyStyles),
+        color: nextColor,
       })
     } else {
       appendCanonicalSpan(target, {
         type: "text",
         text: base,
         styles: nextStyles,
+        color: nextColor,
       })
     }
     return
   }
 
-  node.childNodes.forEach((child) => collectSpans(child, nextStyles, target))
+  node.childNodes.forEach((child) =>
+    collectSpans(child, nextStyles, nextColor, target)
+  )
 }
 
 function lineFromNode(node: Node): OcrLine {
   const spans: OcrSpan[] = []
-  collectSpans(node, [], spans)
+  collectSpans(node, [], null, spans)
   const text = spans
     .map((span) => (span.type === "text" ? span.text : span.base))
     .join("")
@@ -218,6 +237,14 @@ function appendStyledContent(parent: HTMLElement, span: OcrSpan) {
                 ? "sup"
                 : "sub"
     )
+    element.append(content)
+    content = element
+  }
+  const color = canonicalColor(span.color)
+  if (color) {
+    const element = document.createElement("span")
+    element.dataset.textColor = color
+    element.style.color = color
     element.append(content)
     content = element
   }
@@ -329,6 +356,50 @@ function selectedSpanStyles(lines: OcrLine[], selection: EditorSelection) {
   return intersection ?? new Set<TextStyle>()
 }
 
+function selectedSpanColor(lines: OcrLine[], selection: EditorSelection) {
+  const colors = new Set<string | null>()
+  lines.forEach((line, lineIndex) => {
+    if (lineIndex < selection.startLine || lineIndex > selection.endLine) return
+    const selectedStart =
+      lineIndex === selection.startLine ? selection.startOffset : 0
+    const selectedEnd =
+      lineIndex === selection.endLine ? selection.endOffset : line.text.length
+    let cursor = 0
+    line.spans.forEach((span) => {
+      const text = span.type === "text" ? span.text : span.base
+      const end = cursor + text.length
+      if (selectedStart < end && selectedEnd > cursor) {
+        colors.add(canonicalColor(span.color))
+      }
+      cursor = end
+    })
+  })
+  return colors.size === 1 ? [...colors][0] : undefined
+}
+
+function selectionHasExplicitColor(
+  lines: OcrLine[],
+  selection: EditorSelection
+) {
+  return lines.some((line, lineIndex) => {
+    if (lineIndex < selection.startLine || lineIndex > selection.endLine) {
+      return false
+    }
+    const selectedStart =
+      lineIndex === selection.startLine ? selection.startOffset : 0
+    const selectedEnd =
+      lineIndex === selection.endLine ? selection.endOffset : line.text.length
+    let cursor = 0
+    return line.spans.some((span) => {
+      const text = span.type === "text" ? span.text : span.base
+      const end = cursor + text.length
+      const overlaps = selectedStart < end && selectedEnd > cursor
+      cursor = end
+      return overlaps && Boolean(canonicalColor(span.color))
+    })
+  })
+}
+
 function withToggledStyle(
   styles: TextStyle[],
   style: TextStyle,
@@ -377,16 +448,19 @@ function formatLineRange(
       type: "text",
       text: text.slice(0, localStart),
       styles: [...span.styles],
+      color: span.color,
     })
     appendCanonicalSpan(spans, {
       type: "text",
       text: text.slice(localStart, localEnd),
       styles: withToggledStyle(span.styles, style, remove),
+      color: span.color,
     })
     appendCanonicalSpan(spans, {
       type: "text",
       text: text.slice(localEnd),
       styles: [...span.styles],
+      color: span.color,
     })
     cursor = end
   }
@@ -419,6 +493,78 @@ function applyStyleToSelection(
   })
 }
 
+function colorLineRange(
+  line: OcrLine,
+  selectedStart: number,
+  selectedEnd: number,
+  color: string | null
+) {
+  const spans: OcrSpan[] = []
+  let cursor = 0
+  for (const span of line.spans) {
+    const text = span.type === "text" ? span.text : span.base
+    const end = cursor + text.length
+    const overlapStart = Math.max(selectedStart, cursor)
+    const overlapEnd = Math.min(selectedEnd, end)
+    if (overlapStart >= overlapEnd) {
+      appendCanonicalSpan(spans, structuredClone(span))
+      cursor = end
+      continue
+    }
+    if (span.type === "ruby") {
+      spans.push({ ...structuredClone(span), color })
+      cursor = end
+      continue
+    }
+    const localStart = overlapStart - cursor
+    const localEnd = overlapEnd - cursor
+    appendCanonicalSpan(spans, {
+      type: "text",
+      text: text.slice(0, localStart),
+      styles: [...span.styles],
+      color: span.color,
+    })
+    appendCanonicalSpan(spans, {
+      type: "text",
+      text: text.slice(localStart, localEnd),
+      styles: [...span.styles],
+      color,
+    })
+    appendCanonicalSpan(spans, {
+      type: "text",
+      text: text.slice(localEnd),
+      styles: [...span.styles],
+      color: span.color,
+    })
+    cursor = end
+  }
+  return { ...line, spans }
+}
+
+function applyColorToSelection(
+  lines: OcrLine[],
+  selection: EditorSelection,
+  color: string | null
+) {
+  if (
+    selection.startLine === selection.endLine &&
+    selection.startOffset === selection.endOffset
+  ) {
+    return lines
+  }
+  return lines.map((line, lineIndex) => {
+    if (lineIndex < selection.startLine || lineIndex > selection.endLine) {
+      return line
+    }
+    return colorLineRange(
+      line,
+      lineIndex === selection.startLine ? selection.startOffset : 0,
+      lineIndex === selection.endLine ? selection.endOffset : line.text.length,
+      canonicalColor(color)
+    )
+  })
+}
+
 function rubyAtSelection(lines: OcrLine[], selection: EditorSelection) {
   if (selection.startLine !== selection.endLine) return null
   const line = lines[selection.startLine]
@@ -441,13 +587,13 @@ function rubyAtSelection(lines: OcrLine[], selection: EditorSelection) {
 
 function rubySelectionError(lines: OcrLine[], selection: EditorSelection) {
   if (selection.startLine !== selection.endLine) {
-    return "A ruby base must be selected within one subtitle line."
+    return m.editor_ruby_one_line_error()
   }
   if (selection.startOffset === selection.endOffset) {
-    return "Select the exact base text that should receive the ruby annotation."
+    return m.editor_ruby_select_exact_error()
   }
   const line = lines[selection.startLine]
-  if (!line) return "The selected subtitle line is unavailable."
+  if (!line) return m.editor_ruby_missing_line_error()
   let cursor = 0
   for (const span of line.spans) {
     const text = span.type === "text" ? span.text : span.base
@@ -458,7 +604,7 @@ function rubySelectionError(lines: OcrLine[], selection: EditorSelection) {
       span.type === "ruby" &&
       (selection.startOffset !== cursor || selection.endOffset !== end)
     ) {
-      return "Select an existing ruby base exactly before editing it."
+      return m.editor_ruby_exact_existing_error()
     }
     cursor = end
   }
@@ -475,6 +621,7 @@ function applyRubyToSelection(
   if (!line) return lines
   const base = line.text.slice(selection.startOffset, selection.endOffset)
   const styles = canonicalStyles(selectedSpanStyles(lines, selection))
+  const color = selectedSpanColor(lines, selection) ?? null
   const nextSpans: OcrSpan[] = []
   let cursor = 0
   let inserted = false
@@ -494,6 +641,7 @@ function applyRubyToSelection(
         type: "text",
         text: text.slice(0, selection.startOffset - cursor),
         styles: [...span.styles],
+        color: span.color,
       })
     }
     if (!inserted) {
@@ -502,6 +650,7 @@ function applyRubyToSelection(
         base,
         annotations: [{ text: annotation, position }],
         styles,
+        color,
       })
       inserted = true
     }
@@ -510,6 +659,7 @@ function applyRubyToSelection(
         type: "text",
         text: text.slice(selection.endOffset - cursor),
         styles: [...span.styles],
+        color: span.color,
       })
     }
     cursor = end
@@ -538,6 +688,7 @@ function removeRubyFromSelection(lines: OcrLine[], selection: EditorSelection) {
         type: "text",
         text: span.base,
         styles: [...span.styles],
+        color: span.color,
       })
     } else {
       appendCanonicalSpan(spans, structuredClone(span))
@@ -601,6 +752,8 @@ export function SubtitleContentEditor({
   const [activeStyles, setActiveStyles] = React.useState<Set<TextStyle>>(
     new Set()
   )
+  const [activeColor, setActiveColor] = React.useState("#FFFFFF")
+  const [hasExplicitColor, setHasExplicitColor] = React.useState(false)
   const [rubyOpen, setRubyOpen] = React.useState(false)
   const [rubyBase, setRubyBase] = React.useState("")
   const [rubyText, setRubyText] = React.useState("")
@@ -637,6 +790,8 @@ export function SubtitleContentEditor({
     if (!range) return
     selectedRange.current = range
     setActiveStyles(selectedSpanStyles(linesRef.current, range))
+    setActiveColor(selectedSpanColor(linesRef.current, range) ?? "#FFFFFF")
+    setHasExplicitColor(selectionHasExplicitColor(linesRef.current, range))
   }, [])
 
   React.useEffect(() => {
@@ -666,6 +821,8 @@ export function SubtitleContentEditor({
     linesRef.current = normalized
     onChangeRef.current(normalized)
     setActiveStyles(selectedSpanStyles(normalized, range))
+    setActiveColor(selectedSpanColor(normalized, range) ?? "#FFFFFF")
+    setHasExplicitColor(selectionHasExplicitColor(normalized, range))
   }
 
   const applyStyle = (style: TextStyle) => {
@@ -678,13 +835,23 @@ export function SubtitleContentEditor({
     commitStructuredLines(next, range)
   }
 
+  const applyColor = (color: string | null) => {
+    if (disabled) return
+    const root = rootRef.current
+    const range = selectedRange.current
+    if (!root || !range) return
+    const next = applyColorToSelection(linesRef.current, range, color)
+    if (next === linesRef.current) return
+    commitStructuredLines(next, range)
+  }
+
   const openRubyEditor = () => {
     const range = selectedRange.current
     if (!range) {
       setRubyBase("")
       setRubyText("")
       setEditingRuby(false)
-      setRubyError("Select the base text before adding a ruby annotation.")
+      setRubyError(m.editor_ruby_select_base_error())
       setRubyOpen(true)
       return
     }
@@ -714,7 +881,7 @@ export function SubtitleContentEditor({
       return
     }
     if (!annotation) {
-      setRubyError("Enter the annotation text to display with the base.")
+      setRubyError(m.editor_ruby_enter_annotation_error())
       return
     }
     if (
@@ -723,7 +890,7 @@ export function SubtitleContentEditor({
         return codepoint < 0x20 || (codepoint >= 0x7f && codepoint <= 0x9f)
       })
     ) {
-      setRubyError("Ruby annotation text cannot contain control characters.")
+      setRubyError(m.editor_ruby_control_error())
       return
     }
     const next = applyRubyToSelection(
@@ -750,7 +917,7 @@ export function SubtitleContentEditor({
         <div
           className="flex h-10 items-center gap-1 border-b bg-muted/30 px-2"
           role="toolbar"
-          aria-label="Subtitle text formatting"
+          aria-label={m.editor_subtitle_formatting()}
         >
           {editorCommands.map(({ style, label, icon: Icon }, index) => (
             <React.Fragment key={style}>
@@ -780,11 +947,60 @@ export function SubtitleContentEditor({
           <Tooltip>
             <TooltipTrigger
               render={
+                <label
+                  className={cn(
+                    "relative flex size-8 items-center justify-center",
+                    disabled
+                      ? "cursor-not-allowed opacity-50"
+                      : "cursor-pointer"
+                  )}
+                  aria-label={m.editor_font_color()}
+                  aria-disabled={disabled}
+                >
+                  <PaletteIcon className="size-4" />
+                  <Input
+                    type="color"
+                    value={activeColor}
+                    disabled={disabled}
+                    className="absolute inset-0 size-full cursor-pointer opacity-0"
+                    aria-label={m.editor_font_color()}
+                    onChange={(event) => applyColor(event.target.value)}
+                  />
+                  <span
+                    className="pointer-events-none absolute right-1 bottom-0.5 left-1 h-1 rounded-full border"
+                    style={{ backgroundColor: activeColor }}
+                  />
+                </label>
+              }
+            />
+            <TooltipContent>{m.editor_font_color()}</TooltipContent>
+          </Tooltip>
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  disabled={disabled || !hasExplicitColor}
+                  aria-label={m.editor_clear_font_color()}
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={() => applyColor(null)}
+                />
+              }
+            >
+              <EraserIcon />
+            </TooltipTrigger>
+            <TooltipContent>{m.editor_clear_font_color()}</TooltipContent>
+          </Tooltip>
+          <Separator orientation="vertical" className="mx-1" />
+          <Tooltip>
+            <TooltipTrigger
+              render={
                 <Button
                   variant="ghost"
                   size="icon-sm"
                   disabled={disabled}
-                  aria-label="Ruby annotation"
+                  aria-label={m.editor_ruby_annotation()}
                   onMouseDown={(event) => event.preventDefault()}
                   onClick={openRubyEditor}
                 />
@@ -792,16 +1008,16 @@ export function SubtitleContentEditor({
             >
               <CaptionsIcon />
             </TooltipTrigger>
-            <TooltipContent>Ruby annotation</TooltipContent>
+            <TooltipContent>{m.editor_ruby_annotation()}</TooltipContent>
           </Tooltip>
         </div>
         <div
           ref={rootRef}
           contentEditable={!disabled}
           role="textbox"
-          aria-label="Subtitle content"
+          aria-label={m.editor_subtitle_content()}
           aria-multiline="true"
-          data-placeholder="OCR text will appear here"
+          data-placeholder={m.editor_ocr_placeholder()}
           className={cn(
             "min-h-36 px-3 py-2 text-sm leading-6 outline-none",
             "empty:before:pointer-events-none empty:before:text-muted-foreground empty:before:content-[attr(data-placeholder)]",
@@ -819,23 +1035,26 @@ export function SubtitleContentEditor({
           <form className="flex flex-col gap-6" onSubmit={saveRuby}>
             <DialogHeader>
               <DialogTitle>
-                {editingRuby ? "Edit ruby annotation" : "Add ruby annotation"}
+                {editingRuby
+                  ? m.editor_edit_ruby_annotation()
+                  : m.editor_add_ruby_annotation()}
               </DialogTitle>
-              <DialogDescription>
-                Attach reading or interlinear text to the exact selected base
-                range.
-              </DialogDescription>
+              <DialogDescription>{m.editor_description()}</DialogDescription>
             </DialogHeader>
             <FieldGroup>
               <Field>
-                <FieldLabel htmlFor="ruby-base">Base text</FieldLabel>
+                <FieldLabel htmlFor="ruby-base">
+                  {m.editor_base_text()}
+                </FieldLabel>
                 <Input id="ruby-base" value={rubyBase} readOnly />
                 <FieldDescription>
-                  Select a range within one subtitle line.
+                  {m.editor_select_line_description()}
                 </FieldDescription>
               </Field>
               <Field data-invalid={Boolean(rubyError) || undefined}>
-                <FieldLabel htmlFor="ruby-text">Annotation</FieldLabel>
+                <FieldLabel htmlFor="ruby-text">
+                  {m.editor_annotation()}
+                </FieldLabel>
                 <Input
                   id="ruby-text"
                   value={rubyText}
@@ -849,7 +1068,7 @@ export function SubtitleContentEditor({
                 {rubyError && <FieldError>{rubyError}</FieldError>}
               </Field>
               <Field>
-                <FieldLabel>Placement</FieldLabel>
+                <FieldLabel>{m.editor_placement()}</FieldLabel>
                 <ToggleGroup
                   value={[rubyPosition]}
                   variant="outline"
@@ -862,11 +1081,11 @@ export function SubtitleContentEditor({
                 >
                   <ToggleGroupItem value="over" className="w-full">
                     <SuperscriptIcon data-icon="inline-start" />
-                    Over text
+                    {m.editor_over_text()}
                   </ToggleGroupItem>
                   <ToggleGroupItem value="under" className="w-full">
                     <SubscriptIcon data-icon="inline-start" />
-                    Under text
+                    {m.editor_under_text()}
                   </ToggleGroupItem>
                 </ToggleGroup>
               </Field>
@@ -874,7 +1093,7 @@ export function SubtitleContentEditor({
             <DialogFooter>
               {editingRuby && (
                 <Button type="button" variant="outline" onClick={removeRuby}>
-                  Remove ruby
+                  {m.editor_remove_ruby()}
                 </Button>
               )}
               <Button
@@ -882,10 +1101,10 @@ export function SubtitleContentEditor({
                 variant="outline"
                 onClick={() => setRubyOpen(false)}
               >
-                Cancel
+                {m.common_cancel()}
               </Button>
               <Button type="submit" disabled={Boolean(rubyError)}>
-                {editingRuby ? "Update ruby" : "Add ruby"}
+                {editingRuby ? m.editor_update_ruby() : m.editor_add_ruby()}
               </Button>
             </DialogFooter>
           </form>

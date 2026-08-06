@@ -304,6 +304,12 @@ fn render_srt(cues: &[ExportCue]) -> (String, Vec<String>) {
                     cue.index
                 ));
             }
+            if line.spans.iter().any(|span| span.color().is_some()) {
+                warnings.push(format!(
+                    "Cue {} contains text colors; portable SRT output omits them",
+                    cue.index
+                ));
+            }
             if line
                 .spans
                 .iter()
@@ -327,7 +333,9 @@ fn render_srt_line(line: &OcrLine) -> String {
     line.spans
         .iter()
         .map(|span| match span {
-            rosettacue_domain::OcrSpan::Text { text, styles } => render_srt_fragment(text, styles),
+            rosettacue_domain::OcrSpan::Text { text, styles, .. } => {
+                render_srt_fragment(text, styles)
+            }
             rosettacue_domain::OcrSpan::Ruby { base, styles, .. } => {
                 render_srt_fragment(base, styles)
             }
@@ -419,6 +427,7 @@ mod tests {
                 spans: vec![OcrSpan::Text {
                     text: "物語＆字幕".to_owned(),
                     styles: vec![TextStyle::Italic],
+                    color: None,
                 }],
             }],
             normalizations: Vec::new(),
@@ -475,14 +484,17 @@ mod tests {
                 OcrSpan::Text {
                     text: "通常".to_owned(),
                     styles: Vec::new(),
+                    color: None,
                 },
                 OcrSpan::Text {
                     text: "強調".to_owned(),
                     styles: vec![TextStyle::Bold, TextStyle::Italic],
+                    color: None,
                 },
                 OcrSpan::Text {
                     text: "通常".to_owned(),
                     styles: Vec::new(),
+                    color: None,
                 },
             ],
         };
@@ -526,6 +538,7 @@ mod tests {
                             position: rosettacue_domain::RubyPosition::Over,
                         }],
                         styles: vec![TextStyle::Superscript],
+                        color: Some("#FF0000".to_owned()),
                     }],
                 }],
                 normalizations: Vec::new(),
@@ -544,6 +557,11 @@ mod tests {
             warnings
                 .iter()
                 .any(|warning| warning.contains("ruby annotations"))
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("text colors"))
         );
     }
 }

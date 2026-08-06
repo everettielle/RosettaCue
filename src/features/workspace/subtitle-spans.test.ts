@@ -74,4 +74,22 @@ describe("normalizeOcrLines", () => {
       { type: "text", text: "る", styles: ["bold", "italic"] },
     ])
   })
+
+  it("canonicalizes colors and only merges spans with the same color", () => {
+    const [line] = normalizeOcrLines([
+      {
+        text: "RGB",
+        spans: [
+          { type: "text", text: "R", styles: [], color: "#ff0000" },
+          { type: "text", text: "G", styles: [], color: "#00ff00" },
+          { type: "text", text: "B", styles: [], color: "#00FF00" },
+        ],
+      },
+    ])
+
+    expect(line.spans).toEqual([
+      { type: "text", text: "R", styles: [], color: "#FF0000" },
+      { type: "text", text: "GB", styles: [], color: "#00FF00" },
+    ])
+  })
 })

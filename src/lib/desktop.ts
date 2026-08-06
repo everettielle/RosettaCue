@@ -3,9 +3,10 @@ import type {
   BackendMethod,
   RosettaCueDesktopApi,
 } from "@/types/desktop"
+import * as m from "@/paraglide/messages.js"
 
 function unavailable(): never {
-  throw new Error("RosettaCue desktop APIs are available only inside Electron.")
+  throw new Error(m.app_desktop_only())
 }
 
 const browserFallback: RosettaCueDesktopApi = {

@@ -1,3 +1,5 @@
+import * as m from "@/paraglide/messages.js"
+
 export function projectOpenError(error: unknown) {
   const message = error instanceof Error ? error.message : String(error)
   if (
@@ -5,7 +7,7 @@ export function projectOpenError(error: unknown) {
       message
     )
   ) {
-    return "Project not found. It may have been moved or deleted. Remove it from Recent Projects or choose another project."
+    return m.project_not_found()
   }
   return message.replace(/^Error invoking remote method '[^']+': Error: /, "")
 }

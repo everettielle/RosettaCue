@@ -19,6 +19,7 @@ import {
   type WindowMode,
 } from "./contracts"
 import { RustBackend } from "./rust-backend"
+import * as m from "../src/paraglide/messages.js"
 
 const currentDirectory = dirname(fileURLToPath(import.meta.url))
 const appRoot = join(currentDirectory, "..")
@@ -147,9 +148,9 @@ function registerIpc() {
 
   ipcMain.handle("rosettacue:dialog:project", async () => {
     const dialogOptions: OpenDialogOptions = {
-      title: "Open RosettaCue Project",
+      title: m.electron_open_project(),
       properties: ["openDirectory"],
-      message: "Choose a .rosettacue project package.",
+      message: m.electron_choose_project_package(),
     }
     const result = mainWindow
       ? await dialog.showOpenDialog(mainWindow, dialogOptions)

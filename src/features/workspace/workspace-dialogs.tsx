@@ -54,6 +54,7 @@ import type {
 } from "@/features/projects/types"
 import { desktop } from "@/lib/desktop"
 import { projectNameError } from "@/lib/project-name"
+import * as m from "@/paraglide/messages.js"
 
 function parentDirectory(path: string) {
   const normalized = path.replaceAll("\\", "/")
@@ -70,6 +71,20 @@ function formatDuration(seconds: number) {
     .join(":")
 }
 
+function progressPhaseLabel(value: string) {
+  const labels: Record<string, () => string> = {
+    queued: m.progress_queued,
+    demuxing: m.progress_demuxing,
+    decoding: m.progress_decoding,
+    running: m.progress_running,
+    "cue-complete": m.progress_cue_complete,
+    completed: m.progress_completed,
+    stopped: m.progress_stopped,
+    failed: m.progress_failed,
+  }
+  return labels[value]?.() ?? value
+}
+
 export function SaveProjectAsDialog({
   open,
   project,
@@ -81,14 +96,16 @@ export function SaveProjectAsDialog({
   onOpenChange: (open: boolean) => void
   onSaved: (project: ProjectOverview) => void
 }) {
-  const [name, setName] = React.useState(`${project.metadata.name} Copy`)
+  const [name, setName] = React.useState<string>(() =>
+    m.save_as_copy_name({ name: project.metadata.name })
+  )
   const [parent, setParent] = React.useState(parentDirectory(project.path))
   const [busy, setBusy] = React.useState(false)
   const [error, setError] = React.useState<string | null>(null)
 
   const handleOpenChange = (nextOpen: boolean) => {
     if (!nextOpen) {
-      setName(`${project.metadata.name} Copy`)
+      setName(m.save_as_copy_name({ name: project.metadata.name }))
       setParent(parentDirectory(project.path))
       setError(null)
     }
@@ -99,7 +116,7 @@ export function SaveProjectAsDialog({
 
   const chooseParent = async () => {
     const selected = await desktop.dialogs.selectDirectory({
-      title: "Choose where to save the project copy",
+      title: m.save_as_choose_location(),
       defaultPath: parent,
     })
     if (selected) setParent(selected)
@@ -130,14 +147,14 @@ export function SaveProjectAsDialog({
       <DialogContent>
         <form className="flex flex-col gap-6" onSubmit={save}>
           <DialogHeader>
-            <DialogTitle>Save project as</DialogTitle>
-            <DialogDescription>
-              Clone the complete project package with a new identity.
-            </DialogDescription>
+            <DialogTitle>{m.save_as_title()}</DialogTitle>
+            <DialogDescription>{m.save_as_description()}</DialogDescription>
           </DialogHeader>
           <FieldGroup>
             <Field data-invalid={Boolean(invalidName) || undefined}>
-              <FieldLabel htmlFor="save-as-name">Project name</FieldLabel>
+              <FieldLabel htmlFor="save-as-name">
+                {m.field_project_name()}
+              </FieldLabel>
               <Input
                 id="save-as-name"
                 value={name}
@@ -147,14 +164,14 @@ export function SaveProjectAsDialog({
               {invalidName && <FieldError>{invalidName}</FieldError>}
             </Field>
             <Field>
-              <FieldLabel>Destination</FieldLabel>
+              <FieldLabel>{m.save_as_destination()}</FieldLabel>
               <Button
                 type="button"
                 variant="outline"
                 onClick={() => void chooseParent()}
               >
                 <FolderOpenIcon />
-                Choose folder
+                {m.common_choose_folder()}
               </Button>
               <FieldDescription>{parent}</FieldDescription>
             </Field>
@@ -167,11 +184,11 @@ export function SaveProjectAsDialog({
               disabled={busy}
               onClick={() => handleOpenChange(false)}
             >
-              Cancel
+              {m.common_cancel()}
             </Button>
             <Button type="submit" disabled={busy || Boolean(invalidName)}>
               {busy ? <Spinner /> : <SaveIcon />}
-              Save copy
+              {m.save_as_save_copy()}
             </Button>
           </DialogFooter>
         </form>
@@ -209,7 +226,7 @@ export function SourceImportDialog({
 
   const chooseSource = async () => {
     const selected = await desktop.dialogs.selectDirectory({
-      title: "Choose a Blu-ray backup folder",
+      title: m.source_choose_folder(),
     })
     if (!selected) return
     setBusy(true)
@@ -252,10 +269,8 @@ export function SourceImportDialog({
     <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent className="sm:max-w-2xl">
         <DialogHeader>
-          <DialogTitle>Import Blu-ray source</DialogTitle>
-          <DialogDescription>
-            Select the backup root containing BDMV and CERTIFICATE folders.
-          </DialogDescription>
+          <DialogTitle>{m.source_import()}</DialogTitle>
+          <DialogDescription>{m.source_description()}</DialogDescription>
         </DialogHeader>
 
         {!disc ? (
@@ -270,7 +285,9 @@ export function SourceImportDialog({
             ) : (
               <Disc3Icon className="size-7" />
             )}
-            <span>{busy ? "Analyzing source…" : "Choose Blu-ray folder"}</span>
+            <span>
+              {busy ? m.source_analyzing() : m.source_choose_bluray()}
+            </span>
           </Button>
         ) : (
           <div className="flex flex-col gap-4 rounded-xl border p-4">
@@ -282,17 +299,28 @@ export function SourceImportDialog({
                   {disc.root_path}
                 </p>
               </div>
-              <Badge variant="secondary">{disc.titles.length} titles</Badge>
+              <Badge variant="secondary">
+                {m.source_title_count({ count: disc.titles.length })}
+              </Badge>
             </div>
             {mainTitle && (
               <div className="grid grid-cols-4 gap-3 text-sm">
-                <Metric label="Main title" value={`#${mainTitle.index}`} />
-                <Metric label="Playlist" value={mainTitle.playlist} />
                 <Metric
-                  label="Duration"
+                  label={m.source_main_title()}
+                  value={`#${mainTitle.index}`}
+                />
+                <Metric
+                  label={m.source_playlist()}
+                  value={mainTitle.playlist}
+                />
+                <Metric
+                  label={m.source_duration()}
                   value={formatDuration(mainTitle.duration_seconds)}
                 />
-                <Metric label="PGS tracks" value={mainTitle.pgs_tracks} />
+                <Metric
+                  label={m.source_pgs_tracks()}
+                  value={mainTitle.pgs_tracks}
+                />
               </div>
             )}
           </div>
@@ -300,7 +328,7 @@ export function SourceImportDialog({
 
         {error && (
           <Alert variant="destructive">
-            <AlertTitle>Source analysis failed</AlertTitle>
+            <AlertTitle>{m.source_analysis_failed()}</AlertTitle>
             <AlertDescription>{error}</AlertDescription>
           </Alert>
         )}
@@ -313,7 +341,7 @@ export function SourceImportDialog({
               disabled={busy}
               onClick={() => void chooseSource()}
             >
-              Choose another
+              {m.source_choose_another()}
             </Button>
           )}
           <Button
@@ -322,12 +350,12 @@ export function SourceImportDialog({
             disabled={busy}
             onClick={() => handleOpenChange(false)}
           >
-            Cancel
+            {m.common_cancel()}
           </Button>
           {disc && (
             <Button disabled={busy} onClick={() => void attach()}>
               {busy ? <Spinner /> : <Disc3Icon />}
-              Add source
+              {m.source_add()}
             </Button>
           )}
         </DialogFooter>
@@ -393,7 +421,7 @@ export function PgsExtractionDialog({
   }))
   const streamItems = available.map((track) => ({
     value: String(track.index),
-    label: `PGS ${track.index + 1} · ${track.language.toUpperCase()}${track.extracted ? " · already extracted" : ""}`,
+    label: `PGS ${track.index + 1} · ${track.language.toUpperCase()}${track.extracted ? ` · ${m.pgs_already_extracted()}` : ""}`,
   }))
   const progressValue = progress?.estimated_total
     ? Math.min(100, (progress.current / progress.estimated_total) * 100)
@@ -403,18 +431,15 @@ export function PgsExtractionDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-xl">
         <DialogHeader>
-          <DialogTitle>Extract PGS track</DialogTitle>
-          <DialogDescription>
-            Demux one image-subtitle stream and add its Cue images to this
-            project.
-          </DialogDescription>
+          <DialogTitle>{m.pgs_extract_track()}</DialogTitle>
+          <DialogDescription>{m.pgs_description()}</DialogDescription>
         </DialogHeader>
 
         {source && disc && title ? (
           <FieldGroup>
             {document.sources.length > 1 && (
               <Field>
-                <FieldLabel>Source</FieldLabel>
+                <FieldLabel>{m.pgs_source()}</FieldLabel>
                 <Select
                   items={sourceItems}
                   value={source.id}
@@ -440,7 +465,7 @@ export function PgsExtractionDialog({
               </Field>
             )}
             <Field>
-              <FieldLabel>Title</FieldLabel>
+              <FieldLabel>{m.pgs_title()}</FieldLabel>
               <Select
                 items={titleItems}
                 value={String(title.index)}
@@ -470,7 +495,7 @@ export function PgsExtractionDialog({
               </Select>
             </Field>
             <Field>
-              <FieldLabel>PGS stream</FieldLabel>
+              <FieldLabel>{m.pgs_stream()}</FieldLabel>
               <Select
                 items={streamItems}
                 value={String(resolvedStreamIndex)}
@@ -488,7 +513,9 @@ export function PgsExtractionDialog({
                         disabled={track.extracted}
                       >
                         PGS {track.index + 1} · {track.language.toUpperCase()}
-                        {track.extracted ? " · already extracted" : ""}
+                        {track.extracted
+                          ? ` · ${m.pgs_already_extracted()}`
+                          : ""}
                       </SelectItem>
                     ))}
                   </SelectGroup>
@@ -498,17 +525,15 @@ export function PgsExtractionDialog({
           </FieldGroup>
         ) : (
           <Alert variant="destructive">
-            <AlertTitle>No Blu-ray source</AlertTitle>
-            <AlertDescription>
-              Import a source before extracting a PGS track.
-            </AlertDescription>
+            <AlertTitle>{m.pgs_no_source()}</AlertTitle>
+            <AlertDescription>{m.pgs_import_first()}</AlertDescription>
           </Alert>
         )}
 
         {progress && (
           <Progress value={progressValue}>
             <ProgressLabel className="capitalize">
-              {progress.phase}
+              {progressPhaseLabel(progress.phase)}
             </ProgressLabel>
             <ProgressValue />
           </Progress>
@@ -521,7 +546,7 @@ export function PgsExtractionDialog({
             disabled={busy}
             onClick={() => onOpenChange(false)}
           >
-            Cancel
+            {m.common_cancel()}
           </Button>
           <Button
             disabled={
@@ -537,7 +562,7 @@ export function PgsExtractionDialog({
             }}
           >
             {busy ? <Spinner /> : <Disc3Icon />}
-            Start extraction
+            {m.pgs_start_extraction()}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -572,8 +597,8 @@ export function ExportDialog({
     label: `${track.language?.toUpperCase() ?? "UND"} · PGS ${index + 1}`,
   }))
   const scopeItems: Array<{ value: ExportScope; label: string }> = [
-    { value: "all_recognized", label: "All recognized Cues" },
-    { value: "approved_only", label: "Approved Cues only" },
+    { value: "all_recognized", label: m.export_scope_all() },
+    { value: "approved_only", label: m.export_scope_approved() },
   ]
 
   const handleOpenChange = (nextOpen: boolean) => {
@@ -595,7 +620,7 @@ export function ExportDialog({
 
   const chooseOutput = async () => {
     const selected = await desktop.dialogs.selectDirectory({
-      title: "Choose export folder",
+      title: m.export_choose_folder(),
       defaultPath: outputDirectory,
     })
     if (selected) setOutputDirectory(selected)
@@ -625,24 +650,23 @@ export function ExportDialog({
     <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent className="sm:max-w-xl">
         <DialogHeader>
-          <DialogTitle>Export subtitles</DialogTitle>
+          <DialogTitle>{m.export_subtitles()}</DialogTitle>
           <DialogDescription>
-            JSON is the canonical structured record. SRT is generated as a
-            plain-text derivative.
+            {m.export_canonical_description()}
           </DialogDescription>
         </DialogHeader>
 
         {!result ? (
           <FieldGroup>
             <Field>
-              <FieldLabel>Track</FieldLabel>
+              <FieldLabel>{m.export_track()}</FieldLabel>
               <Select
                 items={trackItems}
                 value={resolvedTrackId}
                 onValueChange={(value) => setTrackId(String(value))}
               >
                 <SelectTrigger className="w-full">
-                  <SelectValue placeholder="Choose a track" />
+                  <SelectValue placeholder={m.export_choose_track()} />
                 </SelectTrigger>
                 <SelectContent>
                   <SelectGroup>
@@ -657,7 +681,7 @@ export function ExportDialog({
               </Select>
             </Field>
             <Field>
-              <FieldLabel>Formats</FieldLabel>
+              <FieldLabel>{m.export_formats()}</FieldLabel>
               <div className="grid grid-cols-2 gap-2">
                 {(["json", "srt"] as const).map((format) => (
                   <label
@@ -674,7 +698,7 @@ export function ExportDialog({
               </div>
             </Field>
             <Field>
-              <FieldLabel>Scope</FieldLabel>
+              <FieldLabel>{m.export_scope()}</FieldLabel>
               <Select
                 items={scopeItems}
                 value={scope}
@@ -686,17 +710,19 @@ export function ExportDialog({
                 <SelectContent>
                   <SelectGroup>
                     <SelectItem value="all_recognized">
-                      All recognized Cues
+                      {m.export_scope_all()}
                     </SelectItem>
                     <SelectItem value="approved_only">
-                      Approved Cues only
+                      {m.export_scope_approved()}
                     </SelectItem>
                   </SelectGroup>
                 </SelectContent>
               </Select>
             </Field>
             <Field>
-              <FieldLabel htmlFor="export-name">Base file name</FieldLabel>
+              <FieldLabel htmlFor="export-name">
+                {m.export_base_file_name()}
+              </FieldLabel>
               <Input
                 id="export-name"
                 value={baseName}
@@ -705,17 +731,17 @@ export function ExportDialog({
               />
             </Field>
             <Field>
-              <FieldLabel>Output folder</FieldLabel>
+              <FieldLabel>{m.export_output_folder()}</FieldLabel>
               <Button variant="outline" onClick={() => void chooseOutput()}>
                 <FolderOpenIcon />
-                Choose folder
+                {m.common_choose_folder()}
               </Button>
               <FieldDescription>{outputDirectory}</FieldDescription>
             </Field>
           </FieldGroup>
         ) : (
           <div className="flex flex-col gap-3 rounded-xl border p-4">
-            <p className="font-medium">Export complete</p>
+            <p className="font-medium">{m.export_complete()}</p>
             {result.artifacts.map((artifact) => (
               <div key={artifact.format} className="text-sm">
                 <Badge variant="secondary" className="mr-2 uppercase">
@@ -736,7 +762,7 @@ export function ExportDialog({
             disabled={busy}
             onClick={() => handleOpenChange(false)}
           >
-            {result ? "Done" : "Cancel"}
+            {result ? m.common_done() : m.common_cancel()}
           </Button>
           {!result && (
             <Button
@@ -749,7 +775,7 @@ export function ExportDialog({
               onClick={() => void startExport()}
             >
               {busy ? <Spinner /> : <DownloadIcon />}
-              Export
+              {m.workspace_export()}
             </Button>
           )}
         </DialogFooter>

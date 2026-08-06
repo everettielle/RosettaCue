@@ -242,10 +242,12 @@ fn translated_document(
         .zip(lines)
         .map(|(source_line, text)| {
             let styles = uniform_line_styles(source_line);
+            let color = uniform_line_color(source_line);
             OcrLine {
                 spans: vec![OcrSpan::Text {
                     text: text.clone(),
                     styles,
+                    color,
                 }],
                 text,
             }
@@ -278,6 +280,15 @@ fn uniform_line_styles(line: &OcrLine) -> Vec<TextStyle> {
     }
 }
 
+fn uniform_line_color(line: &OcrLine) -> Option<String> {
+    let first = line.spans.first()?.color();
+    if line.spans.iter().all(|span| span.color() == first) {
+        first.map(str::to_owned)
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use rosettacue_domain::{SubtitlePosition, TextStyle};
@@ -300,6 +311,7 @@ mod tests {
                     spans: vec![OcrSpan::Text {
                         text: "物語は続く。".to_owned(),
                         styles: vec![TextStyle::Italic],
+                        color: Some("#FFFF00".to_owned()),
                     }],
                 }],
                 normalizations: Vec::new(),
@@ -324,6 +336,10 @@ mod tests {
         assert_eq!(
             translated.subtitle.lines[0].spans[0].styles(),
             &[TextStyle::Italic]
+        );
+        assert_eq!(
+            translated.subtitle.lines[0].spans[0].color(),
+            Some("#FFFF00")
         );
         assert_eq!(translated.subtitle.lines[0].text, "The story continues.");
     }

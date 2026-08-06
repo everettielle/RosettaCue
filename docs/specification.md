@@ -100,7 +100,7 @@ The source and translated projects are deliberately not modeled as parallel text
 
 1. **Canonical structured data first.** JSON preserves information that SRT cannot represent.
 2. **Immutable machine evidence.** OCR attempts and recognition output remain available after human edits.
-3. **Append-only authoring history.** Editing, restoration, and translation append revisions.
+3. **Append-first authoring history.** Editing, restoration, translation, undo, and redo append revisions. Explicit user-confirmed history deletion is the sole exception and cannot remove a Cue's final revision.
 4. **Explicit human save.** Inspector changes remain renderer-local until **Save Cue** or a project save command invokes persistence.
 5. **Local-first ownership.** Project state and Cue assets live inside the user-selected package.
 6. **Transport independence.** Electron is an adapter; business behavior remains in Rust.
@@ -315,6 +315,7 @@ Request IDs permit concurrent out-of-order completion. A single Rust writer thre
 | `restore_cue_edit`       | projectPath, cueId                                        | human revision from OCR     | Yes                          |
 | `cue_revision_history`   | projectPath, cueId                                        | revisions newest first      | No                           |
 | `restore_cue_revision`   | projectPath, cueId, revisionId                            | appended revision           | Yes                          |
+| `delete_cue_revision`    | projectPath, cueId, revisionId                            | remaining revisions         | Yes                          |
 | `review_cue`             | projectPath, cueId, status, note                          | decision + overview         | Yes                          |
 | `provider_models`        | provider, baseUrl, apiKey                                 | model IDs                   | Provider read                |
 | `diagnose_provider`      | provider, baseUrl, apiKey                                 | reachability/latency/models | Provider read                |
@@ -522,7 +523,7 @@ The current project schema version is **1**. Opening a package requires `PRAGMA 
   "end_ms": 2611,
   "position": "bottom-center",
   "subtitle": {
-    "prompt_version": "subtitle-ocr-v1",
+    "prompt_version": "subtitle-ocr-v2",
     "provider": "lmstudio",
     "model": "gemma-4-31b-it",
     "language": "jpn",
@@ -542,7 +543,8 @@ The current project schema version is **1**. Opening a package requires `PRAGMA 
     {
       "type": "text",
       "text": "Uは ",
-      "styles": ["italic"]
+      "styles": ["italic"],
+      "color": "#FF0000"
     },
     {
       "type": "text",
@@ -566,11 +568,11 @@ The current project schema version is **1**. Opening a package requires `PRAGMA 
 
 Ruby is named after the typographic ruby annotation convention. `base` is the exact character range receiving the annotation. `annotations[].text` is displayed above (`over`) or below (`under`) that range. This representation can express both Japanese furigana and non-language-specific interlinear annotation without embedding custom XML into plain text.
 
-Every text and ruby span has a required `styles` array. The allowed values are `bold`, `italic`, `underline`, `strikethrough`, `superscript`, and `subscript`; an unstyled span uses an empty array. No line-level style summary exists. Adjacent runs may have different style arrays, enabling human reviewers to format selected ranges. A ruby span applies one style array to its complete base range. Style values are unique and canonicalized in a fixed order. `superscript` and `subscript` are mutually exclusive on the same span.
+Every text and ruby span has a required `styles` array. The allowed values are `bold`, `italic`, `underline`, `strikethrough`, `superscript`, and `subscript`; an unstyled span uses an empty array. A span may also contain an optional uppercase `#RRGGBB` `color`. Missing color means the default white subtitle foreground, so white is never stored as an explicit color. No line-level style summary exists. Adjacent runs may have different styles and colors, enabling human reviewers to format selected ranges. A ruby span applies one style array and color to its complete base range. Style values are unique and canonicalized in a fixed order. `superscript` and `subscript` are mutually exclusive on the same span.
 
-Span normalization runs after every editor mutation and again at the Save Cue boundary. Adjacent ordinary text spans with the same canonical style array are maximally coalesced into one span. Ruby spans are semantic boundaries and never merge with surrounding text or another ruby span, even when their style arrays match. This rule makes a style toggle reversible: applying bold to a substring may temporarily split one run into three, but removing bold joins the three compatible text runs back into one canonical span.
+Span normalization runs after every editor mutation and again at the Save Cue boundary. Adjacent ordinary text spans with the same canonical style array and color are maximally coalesced into one span. Ruby spans are semantic boundaries and never merge with surrounding text or another ruby span, even when their formats match. This rule makes a format toggle reversible: applying bold or color to a substring may temporarily split one run into three, but removing it joins compatible text runs back into one canonical span.
 
-OCR Phase 3 makes one conservative decision for the complete Cue: it returns italic only when every large main-subtitle row and glyph is consistently italic. The deterministic assembler then adds `italic` to every generated span, or leaves every generated span unstyled. OCR never guesses substring styles. Fine-grained styles are authored in the Inspector editor during human review.
+OCR Phase 2 makes conservative decisions for the complete Cue. It returns italic only when every large main-subtitle row and glyph is consistently italic. It returns a named non-white color only when the main glyph interiors are clearly and uniformly that color; white, near-white, mixed, outlined, shadowed, and ambiguous cases use the default. The deterministic assembler applies the accepted format to every generated span. OCR never guesses substring formats. Fine-grained styles and colors are authored in the Inspector editor during human review.
 
 ### 7.3 Position and geometry
 
@@ -594,11 +596,11 @@ JSON export retains:
 - geometry and forced/inferred flags;
 - review status;
 - image hash;
-- per-span bold, italic, underline, strikethrough, superscript, and subscript styles;
+- per-span bold, italic, underline, strikethrough, superscript, and subscript styles plus optional font color;
 - ruby spans;
 - OCR provenance and normalization records.
 
-SRT retains sequence and timing, writes commonly supported inline `<b>`, `<i>`, and `<u>` markup, flattens ruby to its base text, and omits strikethrough, superscript, and subscript with export warnings. RosettaCue does not emit SRT color markup. Position, geometry, ruby placement, font information, unsupported styles, provenance, and review history remain available in the project and JSON. This policy reflects SRT's limited, player-dependent HTML-derived formatting and absence of portable placement or ruby semantics ([Library of Congress format description](https://www.loc.gov/preservation/digital/formats/fdd/fdd000569.shtml), [Matroska subtitle notes](https://www.matroska.org/technical/subtitles.html)). Future ASS export may map the richer style set and placement. WebVTT is a separate candidate when standardized ruby cue spans are needed ([W3C WebVTT](https://www.w3.org/TR/2026/CRD-webvtt1-20260520/)). Ruby remains canonical project data even where the target format needs layout-based emulation.
+SRT retains sequence and timing, writes commonly supported inline `<b>`, `<i>`, and `<u>` markup, flattens ruby to its base text, and omits strikethrough, superscript, subscript, and font color with export warnings. RosettaCue does not emit SRT color markup. Position, geometry, ruby placement, font information, unsupported formats, provenance, and review history remain available in the project and JSON. This policy reflects SRT's limited, player-dependent HTML-derived formatting and absence of portable placement or ruby semantics ([Library of Congress format description](https://www.loc.gov/preservation/digital/formats/fdd/fdd000569.shtml), [Matroska subtitle notes](https://www.matroska.org/technical/subtitles.html)). Future ASS export may map the richer style set and placement. WebVTT is a separate candidate when standardized ruby cue spans are needed ([W3C WebVTT](https://www.w3.org/TR/2026/CRD-webvtt1-20260520/)). Ruby remains canonical project data even where the target format needs layout-based emulation.
 
 ## 8. Detailed workflows
 
@@ -697,23 +699,20 @@ The UI can begin Cue review as soon as Cue events arrive; extraction completion 
 ```mermaid
 flowchart TD
   Input["Cue PNG + language preference"] --> Rows["Foreground projection: estimate large main rows"]
-  Rows --> P1["Pass 1: main text recognition"]
-  P1 --> Validate1{"Schema, text, and row count valid?"}
+  Rows --> P1["Phase 1: main text + ruby recognition"]
+  P1 --> Validate1{"Schema, text, row count, and ruby ranges valid?"}
   Validate1 -->|No| Retry["Bounded corrective retry"] --> P1
-  Validate1 -->|Yes| P2["Pass 2: ruby annotations"]
-  P2 --> Validate2{"Base ranges and annotations valid?"}
+  Validate1 -->|Yes| P2["Phase 2: whole-Cue italic + color recognition"]
+  P2 --> Validate2{"Italic boolean and conservative color valid?"}
   Validate2 -->|No| Retry2["Bounded corrective retry"] --> P2
-  Validate2 -->|Yes| P3["Pass 3: italic substring ranges"]
-  P3 --> Validate3{"Bases exist and ranges do not overlap?"}
-  Validate3 -->|No| Retry3["Bounded corrective retry"] --> P3
-  Validate3 -->|Yes| Normalize["Language-specific normalization + span assembly"]
+  Validate2 -->|Yes| Normalize["Language-specific normalization + span assembly"]
   Normalize --> Persist["Attempt + recognition + OCR revision"]
   Persist --> Event["Publish cue-complete"]
 ```
 
-Recognition and validation profiles may use different providers and models. Pass 1 uses `recognition`; annotation and style-range validation use `validation`. Provider configuration is validated before the job begins.
+Recognition and validation profiles may use different providers and models. Phase 1 uses `recognition` for main characters and ruby/furigana in one image request. Phase 2 uses `validation` for conservative whole-Cue italic and foreground-color classification. Both profiles therefore require vision-capable models. Provider configuration is validated before the job begins. Translation is a separate text-only operation after OCR.
 
-Before the first provider request, the OCR crate decodes the PNG and projects foreground pixels onto the vertical axis. Contiguous row clusters near the maximum glyph-row height are counted as likely large main rows; shorter clusters are treated as ruby candidates. When the estimate is reliable, Pass 1 must return exactly that many main lines. A mismatch is rejected and retried, preventing a syntactically valid one-line response from silently dropping a second visible row. The estimate recognizes layout only and never substitutes for character OCR.
+Before the first provider request, the OCR crate decodes the PNG and projects foreground pixels onto the vertical axis. Contiguous row clusters near the maximum glyph-row height are counted as likely large main rows; shorter clusters are treated as ruby candidates. When the estimate is reliable, Phase 1 must return exactly that many main lines. A mismatch is rejected and retried, preventing a syntactically valid one-line response from silently dropping a second visible row. The estimate recognizes layout only and never substitutes for character OCR.
 
 For Japanese, normalization records every change and applies language-specific
 punctuation and character rules. The canonical long-vowel mark is `ー`;
@@ -978,7 +977,7 @@ Status bar
 
 Ribbon statistics are right aligned. Their numbers use stronger weight, larger size, and tabular figures. Full-height separators divide commands, statistics, and Settings. Cue count appears only in the ribbon status group and Cue List header, not as a title-bar badge.
 
-Ribbon tabs own only the ribbon command panel. Cue List, Preview, and Inspector are a single persistent editing surface outside the tab panels. Cue List width and the Preview/Inspector vertical split are independently resizable. Switching tabs must not remount `CueComparison`, reload the Cue bitmap, discard an object URL, change Cue selection, or reset an Inspector draft.
+Ribbon tabs own only the ribbon command panel. Home gathers the high-frequency save, undo/redo, single-Cue OCR/translation, Review & Next, and revision-history actions. Cue List, Preview, and Inspector are a single persistent editing surface outside the tab panels. Cue List width and the Preview/Inspector vertical split are independently resizable. The comparison switches from two columns to two rows when its panel is narrow, preventing intrinsic-width overflow. Inspector has a content-oriented maximum height and scrolls internally below its minimum usable height. Switching tabs must not remount `CueComparison`, reload the Cue bitmap, discard an object URL, change Cue selection, or reset an Inspector draft.
 
 ### 10.3 Cue List
 
@@ -990,7 +989,7 @@ Ribbon tabs own only the ribbon command panel. Cue List, Preview, and Inspector 
 
 ### 10.4 Preview
 
-The center panel renders source and generated subtitle side by side. Both halves use the same `canvas_width × canvas_height` SVG view box, identical content padding, and the same aspect-ratio policy. The original image is read through the confined `cue_image` command and projected using the Cue's bitmap dimensions plus extraction padding. The generated subtitle is rendered through an SVG `foreignObject` at the unpadded Cue geometry; font size and line height are derived from that geometry. When the semantic position is unchanged, the source bounding box is preserved exactly. An edited nine-grid position moves the same-sized generated box to the requested anchor. This keeps position and apparent scale directly comparable instead of independently sizing the two panes. Ruby spans render through HTML ruby markup; `ruby-position` is applied to the ruby container so `over` and `under` remain visually distinct in Chromium. Bold, italic, underline, strikethrough, superscript, and subscript render independently for each span.
+The center panel renders source and generated subtitle side by side when wide, and stacks them when the resized panel becomes narrow. Both halves use the same `canvas_width × canvas_height` SVG view box, identical content padding, and the same aspect-ratio policy. The original image is read through the confined `cue_image` command and projected using the Cue's bitmap dimensions plus extraction padding. The generated subtitle is rendered through an SVG `foreignObject` at the unpadded Cue geometry; font size and line height are derived from that geometry. When the semantic position is unchanged, the source bounding box is preserved exactly. An edited nine-grid position moves the same-sized generated box to the requested anchor. This keeps position and apparent scale directly comparable instead of independently sizing the two panes. Ruby spans render through HTML ruby markup; `ruby-position` is applied to the ruby container so `over` and `under` remain visually distinct in Chromium. Bold, italic, underline, strikethrough, superscript, subscript, and font color render independently for each span.
 
 The native close control is the only project-window close affordance. Theme changes are made through Settings. The status bar does not label projects as local because all RosettaCue projects are local by definition.
 
@@ -1002,7 +1001,10 @@ Inspector is the resizable lower panel beneath Cue Comparison. It is the only ti
 - single-Cue OCR with overwrite semantics;
 - single-Cue translation;
 - explicit human review approval;
-- WYSIWYG text editing with selection-based bold, italic, underline, strikethrough, superscript, and subscript controls;
+- review-and-next navigation plus adjacent-Cue controls beside the review action;
+- visible OCR status beside the Inspector title rather than inside timing controls;
+- Cue revision-history viewing, restoration, and guarded deletion that retains at least one revision;
+- WYSIWYG text editing with selection-based bold, italic, underline, strikethrough, superscript, subscript, and font-color controls;
 - selection-based ruby creation, editing, removal, and over/under placement within one subtitle line;
 - preservation of ruby spans while editing surrounding styled ranges;
 - start/end timestamp editing;
@@ -1017,7 +1019,7 @@ Settings uses a left-section layout:
 
 - **General:** theme and media-tool diagnostics.
 - **Project:** OCR language and translation target language.
-- **Models:** independent OCR, validation, and translation profiles.
+- **Models:** independent Phase 1 OCR, Phase 2 validation/style, and post-OCR translation profiles with task-specific capability descriptions.
 
 Supported providers are LM Studio, Ollama, OpenAI API, and Anthropic API. A profile contains provider, base URL, model, optional session API key, timeout, token limit, and attempt count. API keys remain only in renderer memory and are redacted from local preferences and project records.
 
@@ -1038,7 +1040,7 @@ Application styling uses semantic tokens such as `background`, `foreground`, `mu
 
 ### 10.8 Localization boundary
 
-Domain enums and persisted language values use stable codes such as `jpn`, `kor`, and `eng`. Presentation labels are not persisted in project data. The current renderer baseline displays English UI strings; localization must operate exclusively at the renderer presentation boundary and must not alter IPC method names, enum wire values, or project JSON.
+Domain enums and persisted language values use stable codes such as `jpn`, `kor`, and `eng`. Presentation labels are not persisted in project data. Paraglide JS owns presentation messages, with English as the base and only configured locale. Source messages live in `messages/en.json` and compile into the generated `src/paraglide/` runtime. Localization operates exclusively at the renderer and native desktop presentation boundary and does not alter IPC method names, enum wire values, provider identifiers, or project JSON.
 
 ## 11. Concurrency, transactions, and state
 
@@ -1257,10 +1259,11 @@ A packaged smoke test verifies:
 16. Standard output from the sidecar contains only one JSON object per line.
 17. Project opening rejects every schema version other than the current version.
 18. A reliable bitmap row estimate and the accepted Phase 1 main-line count must agree.
-19. Styled spans compose exactly to `OcrLine.text`; every span has a required canonical style array.
+19. Styled spans compose exactly to `OcrLine.text`; every span has a required canonical style array and at most one optional `#RRGGBB` color.
 20. A span cannot contain duplicate styles or both superscript and subscript.
 21. A ruby annotation has a non-empty exact base range within one line and at least one non-empty over/under annotation.
-22. Adjacent ordinary text spans with identical canonical style arrays are maximally coalesced; ruby boundaries are preserved.
+22. Adjacent ordinary text spans with identical canonical style arrays and colors are maximally coalesced; ruby boundaries are preserved.
+23. Revision deletion retains at least one effective revision for the Cue and invalidates its review status.
 
 ## 18. Conformance summary
 
@@ -1271,15 +1274,15 @@ The current baseline conforms to the following functional surface:
 - right-aligned ribbon statistics and native title-bar alignment;
 - resizable Cue List and vertically split Preview/Inspector editing surface;
 - structured side-by-side Cue rendering in one shared Blu-ray canvas coordinate system;
-- row-count-verified OCR and conservative whole-Cue italic recognition;
-- selection-based rich subtitle editing with six structured span styles and editable over/under ruby;
+- two-phase, row-count-verified OCR with combined text/ruby recognition and conservative whole-Cue italic/color recognition;
+- selection-based rich subtitle editing with six structured span styles, font color, and editable over/under ruby;
 - explicit Cue draft save with content, timing, and position editing;
 - project clone, source import, PGS extraction, export dialogs;
 - independent task model settings and provider diagnostics;
 - selected/all OCR with pause, resume, and stop;
 - selected/all translation;
-- human review approval and revision-based Undo/Redo;
+- human review approval, Review & Next, revision-based Undo/Redo, and revision-history restore/delete;
 - Electron-to-Rust progress event propagation;
 - macOS, Windows, and Linux packaging configuration.
 
-The current renderer presents English strings. Project data, language codes, provider enums, and IPC contracts are locale-neutral, preserving the boundary required for later presentation-layer localization.
+The current renderer presents the English Paraglide catalog. Project data, language codes, provider enums, and IPC contracts remain locale-neutral so additional presentation locales can be added without a data or protocol migration.

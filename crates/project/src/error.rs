@@ -18,6 +18,10 @@ pub enum ProjectError {
     UnsupportedSchema { found: u32, expected: u32 },
     #[error("cue was not found in the project")]
     CueNotFound,
+    #[error("cue revision was not found in the project")]
+    RevisionNotFound,
+    #[error("the only remaining cue revision cannot be deleted")]
+    LastRevision,
     #[error("project statistics contain an invalid count")]
     InvalidStatistics,
     #[error("project contains an invalid record: {0}")]
