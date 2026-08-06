@@ -6,6 +6,8 @@
 
 **Turn Blu-ray image subtitles into verifiable text.**
 
+<img src="public/demo.png" alt="RosettaCue Demo Screen" height="320" />
+
 RosettaCue extracts PGS subtitle streams from a Blu-ray backup, recognizes them
 with the multimodal LLM of your choice, and gives you a real editor to review,
 style, translate, and export the result — entirely on your own machine.
