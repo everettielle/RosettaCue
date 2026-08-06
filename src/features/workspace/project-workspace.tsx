@@ -23,7 +23,6 @@ import {
   Undo2Icon,
 } from "lucide-react"
 
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
@@ -44,6 +43,7 @@ import { ScrollArea } from "@/components/ui/scroll-area"
 import { Separator } from "@/components/ui/separator"
 import { Spinner } from "@/components/ui/spinner"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { toast } from "@/components/ui/toast"
 import {
   Tooltip,
   TooltipContent,
@@ -123,6 +123,7 @@ type RibbonCommand = {
 }
 
 const INSPECTOR_MIN_HEIGHT = 220
+const WORKSPACE_ERROR_TOAST_ID = "workspace-error"
 
 const ribbonTabs: Array<{
   value: string
@@ -454,6 +455,25 @@ export function ProjectWorkspace({
       panel.resize(inspectorMaxHeight)
     }
   }, [inspectorMaxHeight, inspectorPanelRef])
+
+  React.useEffect(() => {
+    if (!error) {
+      toast.close(WORKSPACE_ERROR_TOAST_ID)
+      return
+    }
+
+    toast.add({
+      id: WORKSPACE_ERROR_TOAST_ID,
+      title: m.workspace_action_failed(),
+      description: error,
+      type: "error",
+      timeout: 0,
+      priority: "high",
+      onClose: () => setError(null),
+    })
+  }, [error])
+
+  React.useEffect(() => () => toast.close(WORKSPACE_ERROR_TOAST_ID), [])
 
   const loadDocument = React.useCallback(async () => {
     const showLoading = !hasLoadedDocumentRef.current
@@ -1188,13 +1208,6 @@ export function ProjectWorkspace({
           </TabsContent>
         ))}
       </Tabs>
-
-      {error && (
-        <Alert variant="destructive" className="m-3 shrink-0">
-          <AlertTitle>{m.workspace_action_failed()}</AlertTitle>
-          <AlertDescription>{error}</AlertDescription>
-        </Alert>
-      )}
 
       <div className="min-h-0 flex-1">
         <ResizablePanelGroup orientation="horizontal">

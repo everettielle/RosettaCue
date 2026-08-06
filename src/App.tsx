@@ -1,6 +1,7 @@
 import * as React from "react"
 
 import { TooltipProvider } from "@/components/ui/tooltip"
+import { Toaster } from "@/components/ui/toast"
 import { CreateProjectDialog } from "@/features/projects/create-project-dialog"
 import {
   loadRecentProjects,
@@ -183,6 +184,7 @@ function App() {
         onChooseParent={() => void chooseProjectParent()}
         onSubmit={createProject}
       />
+      <Toaster />
     </TooltipProvider>
   )
 }
