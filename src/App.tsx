@@ -141,6 +141,7 @@ function App() {
     <TooltipProvider>
       {project ? (
         <ProjectWorkspace
+          key={project.path}
           project={project}
           onProjectChange={(next) => {
             setProject(next)

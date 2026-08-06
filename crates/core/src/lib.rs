@@ -14,10 +14,10 @@ pub use rosettacue_export::{
 };
 use rosettacue_ocr::PROMPT_VERSION;
 pub use rosettacue_ocr::{
-    LlmProvider, LmStudioConfig, LmStudioModel, OcrPipelineConfig, ProviderConfig,
-    ProviderDiagnostic,
+    LlmProvider, LmStudioConfig, LmStudioModel, OcrDebugLogEntry, OcrPipelineConfig,
+    ProviderConfig, ProviderDiagnostic,
 };
-use rosettacue_ocr::{OcrBackend, OcrRequest, ProviderOcrBackend};
+use rosettacue_ocr::{OcrRequest, ProviderOcrBackend};
 use rosettacue_project::{ProjectError, ProjectStore};
 use rosettacue_translation::{SubtitleTranslator, TranslationRequest};
 use uuid::Uuid;
@@ -586,6 +586,7 @@ impl Application {
         config: &LmStudioConfig,
         mut should_continue: impl FnMut() -> bool,
         mut progress: impl FnMut(OcrProgress),
+        mut debug: impl FnMut(OcrDebugLogEntry),
     ) -> Result<OcrJobResult, OcrJobError> {
         self.recognize_ocr(
             project_path,
@@ -595,6 +596,7 @@ impl Application {
             &OcrPipelineConfig::single(config.clone()),
             &mut should_continue,
             &mut progress,
+            &mut debug,
         )
     }
 
@@ -614,6 +616,7 @@ impl Application {
         config: &OcrPipelineConfig,
         mut should_continue: impl FnMut() -> bool,
         mut progress: impl FnMut(OcrProgress),
+        mut debug: impl FnMut(OcrDebugLogEntry),
     ) -> Result<OcrJobResult, OcrJobError> {
         let store = ProjectStore::open(project_path)?;
         let selected = select_ocr_cues(&store, cue_ids, overwrite)?;
@@ -694,7 +697,7 @@ impl Application {
                 image_sha256: cue.image_sha256.clone(),
                 language: language.to_owned(),
             };
-            match backend.recognize(&request) {
+            match backend.recognize_with_debug(&request, &mut debug) {
                 Ok(result) => {
                     let recognition = store.save_ocr_success(
                         cue.id,
@@ -1001,6 +1004,7 @@ impl Application {
         config: &OcrPipelineConfig,
         mut should_continue: impl FnMut() -> bool,
         mut progress: impl FnMut(OcrProgress),
+        mut debug: impl FnMut(OcrDebugLogEntry),
     ) -> Result<OcrJobResult, OcrJobError> {
         let store = ProjectStore::open(project_path.clone())?;
         let job = store
@@ -1030,6 +1034,7 @@ impl Application {
             config,
             &mut should_continue,
             &mut progress,
+            &mut debug,
         )?;
         store.cancel_job(
             job_id,

@@ -8,8 +8,9 @@ use std::path::PathBuf;
 
 pub use error::OcrError;
 pub use lmstudio::{
-    LmStudioBackend, LmStudioConfig, LmStudioModel, OcrPipelineConfig, ProviderOcrBackend,
-    diagnose_provider, list_lmstudio_models, list_provider_models,
+    LmStudioBackend, LmStudioConfig, LmStudioModel, OcrDebugLogEntry, OcrDebugStatus,
+    OcrPipelineConfig, ProviderOcrBackend, diagnose_provider, list_lmstudio_models,
+    list_provider_models,
 };
 pub use prompt::PROMPT_VERSION;
 use rosettacue_domain::OcrDocument;

@@ -471,6 +471,7 @@ fn dispatch(
             let params: RecognizeLmStudioParams = parse(value)?;
             controller.start()?;
             let event_sender = sender.clone();
+            let debug_sender = sender.clone();
             let paused_sender = sender.clone();
             let result = app.recognize_lmstudio(
                 params.project_path,
@@ -484,6 +485,7 @@ fn dispatch(
                     })
                 },
                 move |progress| emit(&event_sender, "ocr-progress", progress),
+                move |entry| emit(&debug_sender, "debug-log", entry),
             );
             controller.finish();
             serialize_result(result)
@@ -492,6 +494,7 @@ fn dispatch(
             let params: RecognizeOcrParams = parse(value)?;
             controller.start()?;
             let event_sender = sender.clone();
+            let debug_sender = sender.clone();
             let paused_sender = sender.clone();
             let result = app.recognize_ocr(
                 params.project_path,
@@ -505,6 +508,7 @@ fn dispatch(
                     })
                 },
                 move |progress| emit(&event_sender, "ocr-progress", progress),
+                move |entry| emit(&debug_sender, "debug-log", entry),
             );
             controller.finish();
             serialize_result(result)
@@ -534,6 +538,7 @@ fn dispatch(
             let params: ResumeOcrParams = parse(value)?;
             controller.start()?;
             let event_sender = sender.clone();
+            let debug_sender = sender.clone();
             let paused_sender = sender.clone();
             let result = app.resume_ocr_job(
                 params.project_path,
@@ -545,6 +550,7 @@ fn dispatch(
                     })
                 },
                 move |progress| emit(&event_sender, "ocr-progress", progress),
+                move |entry| emit(&debug_sender, "debug-log", entry),
             );
             controller.finish();
             serialize_result(result)

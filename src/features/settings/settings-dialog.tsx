@@ -1,6 +1,7 @@
 import * as React from "react"
 import {
   ActivityIcon,
+  BugIcon,
   CheckCircle2Icon,
   FilmIcon,
   MonitorIcon,
@@ -23,6 +24,7 @@ import {
 } from "@/components/ui/dialog"
 import {
   Field,
+  FieldContent,
   FieldDescription,
   FieldGroup,
   FieldLabel,
@@ -38,6 +40,7 @@ import {
 } from "@/components/ui/select"
 import { Separator } from "@/components/ui/separator"
 import { Spinner } from "@/components/ui/spinner"
+import { Switch } from "@/components/ui/switch"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
 import { useTheme } from "@/components/theme-provider"
@@ -56,7 +59,7 @@ import { desktop } from "@/lib/desktop"
 import { cn } from "@/lib/utils"
 import * as m from "@/paraglide/messages.js"
 
-type Section = "general" | "project" | "models"
+type Section = "general" | "project" | "models" | "advanced"
 type Appearance = "system" | "light" | "dark"
 
 const sections: Array<{
@@ -67,6 +70,7 @@ const sections: Array<{
   { value: "general", label: m.settings_general(), icon: MonitorCogIcon },
   { value: "project", label: m.settings_project(), icon: FilmIcon },
   { value: "models", label: m.settings_models(), icon: ActivityIcon },
+  { value: "advanced", label: m.settings_advanced(), icon: BugIcon },
 ]
 
 const providers: Array<{ value: LlmProvider; label: string }> = [
@@ -140,12 +144,16 @@ function mediaToolOriginLabel(origin: MediaToolDiagnostic["origin"]) {
 export function SettingsDialog({
   open,
   settings,
+  debugLogCount,
   onOpenChange,
+  onOpenDebugLog,
   onSave,
 }: {
   open: boolean
   settings: WorkspaceSettings
+  debugLogCount: number
   onOpenChange: (open: boolean) => void
+  onOpenDebugLog: () => void
   onSave: (settings: WorkspaceSettings) => void
 }) {
   const { theme, setTheme } = useTheme()
@@ -571,6 +579,52 @@ export function SettingsDialog({
                       })}
                     </p>
                   )}
+                </div>
+              </div>
+            )}
+
+            {section === "advanced" && (
+              <div className="flex flex-col gap-6">
+                <div>
+                  <h3 className="font-medium">{m.settings_debugging()}</h3>
+                  <p className="text-sm text-muted-foreground">
+                    {m.settings_debugging_description()}
+                  </p>
+                </div>
+                <Field orientation="horizontal">
+                  <FieldContent>
+                    <FieldLabel htmlFor="debug-logging">
+                      {m.settings_debug_logging()}
+                    </FieldLabel>
+                    <FieldDescription>
+                      {m.settings_debug_logging_description()}
+                    </FieldDescription>
+                  </FieldContent>
+                  <Switch
+                    id="debug-logging"
+                    checked={draft.debug_logging}
+                    onCheckedChange={(checked) =>
+                      setDraft((current) => ({
+                        ...current,
+                        debug_logging: checked,
+                      }))
+                    }
+                  />
+                </Field>
+                <Separator />
+                <div className="flex items-center gap-3">
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm font-medium">
+                      {m.settings_debug_log()}
+                    </p>
+                    <p className="text-sm text-muted-foreground">
+                      {m.settings_debug_log_summary({ count: debugLogCount })}
+                    </p>
+                  </div>
+                  <Button variant="outline" onClick={onOpenDebugLog}>
+                    <BugIcon data-icon="inline-start" />
+                    {m.settings_open_debug_log()}
+                  </Button>
                 </div>
               </div>
             )}

@@ -38,6 +38,7 @@ export const backendEvents = [
   "ocr-progress",
   "ocr-control-state",
   "translation-progress",
+  "debug-log",
 ] as const
 
 export type BackendEvent = (typeof backendEvents)[number]

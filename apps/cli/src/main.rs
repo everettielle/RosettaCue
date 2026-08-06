@@ -370,6 +370,7 @@ fn run_ocr_command(app: Application, command: OcrCommand) -> anyhow::Result<()> 
                 &OcrPipelineConfig {
                     recognition,
                     validation,
+                    debug_logging: false,
                 },
                 || true,
                 |progress| {
@@ -378,6 +379,7 @@ fn run_ocr_command(app: Application, command: OcrCommand) -> anyhow::Result<()> 
                         progress.current, progress.total, progress.phase
                     );
                 },
+                |_| {},
             )?;
             eprintln!();
             println!("{}", serde_json::to_string_pretty(&result)?);

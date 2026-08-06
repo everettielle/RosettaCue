@@ -55,6 +55,7 @@ import type {
   ExportOptions,
   ExportResult,
   OcrDocument,
+  OcrDebugLogEntry,
   OcrJobResult,
   OcrLine,
   OcrProgress,
@@ -74,6 +75,7 @@ import {
   validateProviderConfig,
   type WorkspaceSettings,
 } from "@/features/settings/model-settings"
+import { DebugLogDialog } from "@/features/settings/debug-log-dialog"
 import { SettingsDialog } from "@/features/settings/settings-dialog"
 import { RevisionHistoryDialog } from "@/features/workspace/revision-history-dialog"
 import {
@@ -357,11 +359,13 @@ function IconButton({
   icon: Icon,
   onClick,
   disabled,
+  size = "icon-sm",
 }: {
   label: string
   icon: LucideIcon
   onClick: () => void
   disabled?: boolean
+  size?: "icon-xs" | "icon-sm"
 }) {
   return (
     <Tooltip>
@@ -369,7 +373,7 @@ function IconButton({
         render={
           <Button
             variant="ghost"
-            size="icon-sm"
+            size={size}
             aria-label={label}
             onClick={onClick}
             disabled={disabled}
@@ -406,6 +410,8 @@ export function ProjectWorkspace({
     loadWorkspaceSettings
   )
   const [settingsOpen, setSettingsOpen] = React.useState(false)
+  const [debugLogOpen, setDebugLogOpen] = React.useState(false)
+  const [debugLogs, setDebugLogs] = React.useState<OcrDebugLogEntry[]>([])
   const [saveAsOpen, setSaveAsOpen] = React.useState(false)
   const [sourceImportOpen, setSourceImportOpen] = React.useState(false)
   const [pgsOpen, setPgsOpen] = React.useState(false)
@@ -425,6 +431,7 @@ export function ProjectWorkspace({
     number | null
   >(null)
   const inspectorPanelRef = usePanelRef()
+  const hasLoadedDocumentRef = React.useRef(false)
   const inspectorMaxHeight =
     inspectorContentHeight === null
       ? undefined
@@ -449,13 +456,15 @@ export function ProjectWorkspace({
   }, [inspectorMaxHeight, inspectorPanelRef])
 
   const loadDocument = React.useCallback(async () => {
-    setLoading(true)
+    const showLoading = !hasLoadedDocumentRef.current
+    if (showLoading) setLoading(true)
     setError(null)
     try {
       const next = await desktop.invoke<ProjectDocument>("project_document", {
         path: project.path,
       })
       setDocument(next)
+      hasLoadedDocumentRef.current = true
       setActiveCueId((current) =>
         current && next.cues.some((cue) => cue.id === current)
           ? current
@@ -466,12 +475,13 @@ export function ProjectWorkspace({
       setError(reason instanceof Error ? reason.message : String(reason))
       setStatusMessage(m.status_unable_load_project())
     } finally {
-      setLoading(false)
+      if (showLoading) setLoading(false)
     }
   }, [project.path])
 
   React.useEffect(() => {
     let active = true
+    hasLoadedDocumentRef.current = false
     desktop
       .invoke<ProjectDocument>("project_document", { path: project.path })
       .then((next) => {
@@ -479,6 +489,7 @@ export function ProjectWorkspace({
           return
         }
         setDocument(next)
+        hasLoadedDocumentRef.current = true
         setActiveCueId(next.cues[0]?.id ?? null)
         setStatusMessage(m.status_project_loaded())
       })
@@ -614,11 +625,18 @@ export function ProjectWorkspace({
         }
       }
     )
+    const removeDebugListener = desktop.on<OcrDebugLogEntry>(
+      "debug-log",
+      (entry) => {
+        setDebugLogs((current) => [...current.slice(-199), entry])
+      }
+    )
     return () => {
       removePgsListener()
       removeOcrListener()
       removeControlListener()
       removeTranslationListener()
+      removeDebugListener()
     }
   }, [])
 
@@ -793,6 +811,7 @@ export function ProjectWorkspace({
         config: {
           recognition: settings.profiles.ocr,
           validation: settings.profiles.validation,
+          debug_logging: settings.debug_logging,
         },
       })
       onProjectChange(result.project)
@@ -1370,13 +1389,27 @@ export function ProjectWorkspace({
       <SettingsDialog
         open={settingsOpen}
         settings={settings}
+        debugLogCount={debugLogs.length}
         onOpenChange={setSettingsOpen}
+        onOpenDebugLog={() => {
+          setSettingsOpen(false)
+          setDebugLogOpen(true)
+        }}
         onSave={(next) => {
           setSettings(next)
           saveWorkspaceSettings(next)
           setError(null)
           setStatusMessage(m.status_settings_saved())
         }}
+      />
+      <DebugLogDialog
+        open={debugLogOpen}
+        entries={debugLogs}
+        onOpenChange={(open) => {
+          setDebugLogOpen(open)
+          if (!open) setSettingsOpen(true)
+        }}
+        onClear={() => setDebugLogs([])}
       />
       <RevisionHistoryDialog
         open={revisionHistoryOpen}
@@ -1760,10 +1793,6 @@ function Inspector({
                 )}
                 {m.workspace_translate()}
               </Button>
-              <Button size="sm" variant="outline" onClick={onOpenHistory}>
-                <HistoryIcon data-icon="inline-start" />
-                {m.revision_history_title()}
-              </Button>
               <Button
                 size="sm"
                 variant="outline"
@@ -1816,6 +1845,12 @@ function Inspector({
                       >
                         {changed ? m.workspace_unsaved() : m.workspace_saved()}
                       </Badge>
+                      <IconButton
+                        label={m.revision_history_title()}
+                        icon={HistoryIcon}
+                        size="icon-xs"
+                        onClick={onOpenHistory}
+                      />
                     </div>
                     <SubtitleContentEditor
                       lines={draft?.lines ?? []}

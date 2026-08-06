@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
-use std::time::Instant;
+use std::fmt::Display;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -26,6 +27,8 @@ pub type LmStudioBackend = ProviderOcrBackend;
 pub struct OcrPipelineConfig {
     pub recognition: ProviderConfig,
     pub validation: ProviderConfig,
+    #[serde(default)]
+    pub debug_logging: bool,
 }
 
 impl OcrPipelineConfig {
@@ -34,6 +37,7 @@ impl OcrPipelineConfig {
         Self {
             recognition: config.clone(),
             validation: config,
+            debug_logging: false,
         }
     }
 
@@ -42,6 +46,7 @@ impl OcrPipelineConfig {
         Self {
             recognition: self.recognition.redacted(),
             validation: self.validation.redacted(),
+            debug_logging: self.debug_logging,
         }
     }
 }
@@ -56,6 +61,59 @@ pub struct ProviderOcrBackend {
     config: OcrPipelineConfig,
     recognition_client: ProviderClient,
     validation_client: ProviderClient,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OcrDebugStatus {
+    Succeeded,
+    ValidationFailed,
+    ProviderFailed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OcrDebugLogEntry {
+    pub created_at_ms: u64,
+    pub cue_id: uuid::Uuid,
+    pub cue_index: u32,
+    pub stage: String,
+    pub attempt: u32,
+    pub provider: String,
+    pub model: String,
+    pub status: OcrDebugStatus,
+    pub raw_response: Option<String>,
+    pub error: Option<String>,
+}
+
+struct DebugReporter<'a, F> {
+    enabled: bool,
+    request: &'a OcrRequest,
+    callback: &'a mut F,
+}
+
+impl<F: FnMut(OcrDebugLogEntry)> DebugReporter<'_, F> {
+    fn report(
+        &mut self,
+        client: &ProviderClient,
+        stage: &str,
+        attempt: u32,
+        status: OcrDebugStatus,
+        raw_response: Option<&str>,
+        error: Option<&dyn Display>,
+    ) {
+        if !self.enabled {
+            return;
+        }
+        (self.callback)(debug_log_entry(
+            self.request,
+            client,
+            stage,
+            attempt,
+            status,
+            raw_response.map(str::to_owned),
+            error.map(ToString::to_string),
+        ));
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -119,12 +177,13 @@ impl ProviderOcrBackend {
         })
     }
 
-    fn run_stage<T>(
+    fn run_stage<T, F: FnMut(OcrDebugLogEntry)>(
         client: &ProviderClient,
         image_url: &str,
-        stage: &str,
+        stage: &'static str,
         user_text: &str,
         schema: &Value,
+        debug: &mut DebugReporter<'_, F>,
         validate: impl Fn(&str) -> Result<T, OcrError>,
     ) -> Result<(T, CompletionResponse, u32), OcrError> {
         let mut previous: Option<String> = None;
@@ -133,54 +192,105 @@ impl ProviderOcrBackend {
             let correction = validation_error
                 .as_deref()
                 .map(|error| prompt::retry(stage, error));
-            let response = client.complete(&CompletionRequest {
+            let response = match client.complete(&CompletionRequest {
                 system: SYSTEM_PROMPT,
                 user_text,
                 image_png_base64: Some(image_url),
                 response_format: Some(schema),
                 previous_response: previous.as_deref(),
                 correction: correction.as_deref(),
-            })?;
+            }) {
+                Ok(response) => response,
+                Err(error) => {
+                    debug.report(
+                        client,
+                        stage,
+                        attempt,
+                        OcrDebugStatus::ProviderFailed,
+                        None,
+                        Some(&error),
+                    );
+                    return Err(error.into());
+                }
+            };
             match validate(&response.content) {
-                Ok(value) => return Ok((value, response, attempt)),
+                Ok(value) => {
+                    debug.report(
+                        client,
+                        stage,
+                        attempt,
+                        OcrDebugStatus::Succeeded,
+                        Some(&response.content),
+                        None,
+                    );
+                    return Ok((value, response, attempt));
+                }
                 Err(error) if attempt < client.config().max_attempts => {
+                    debug.report(
+                        client,
+                        stage,
+                        attempt,
+                        OcrDebugStatus::ValidationFailed,
+                        Some(&response.content),
+                        Some(&error),
+                    );
                     validation_error = Some(error.to_string());
                     previous = Some(response.content);
                 }
-                Err(error) => return Err(error),
+                Err(error) => {
+                    debug.report(
+                        client,
+                        stage,
+                        attempt,
+                        OcrDebugStatus::ValidationFailed,
+                        Some(&response.content),
+                        Some(&error),
+                    );
+                    return Err(error);
+                }
             }
         }
         Err(OcrError::Validation(format!(
             "{stage} exhausted all attempts"
         )))
     }
-}
 
-impl OcrBackend for ProviderOcrBackend {
-    fn backend_id(&self) -> String {
-        format!(
-            "{}:{}:{};validation={}:{}:{}",
-            self.config.recognition.provider.as_str(),
-            self.config.recognition.base_url.trim_end_matches('/'),
-            self.config.recognition.model,
-            self.config.validation.provider.as_str(),
-            self.config.validation.base_url.trim_end_matches('/'),
-            self.config.validation.model,
-        )
+    /// Recognizes one cue while reporting opt-in provider responses and validation failures.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the image cannot be read, the provider is unavailable, or a stage
+    /// response fails deterministic validation.
+    pub fn recognize_with_debug(
+        &self,
+        request: &OcrRequest,
+        mut debug: impl FnMut(OcrDebugLogEntry),
+    ) -> Result<OcrRecognition, OcrError> {
+        self.recognize_inner(request, &mut debug)
     }
 
-    fn recognize(&self, request: &OcrRequest) -> Result<OcrRecognition, OcrError> {
+    fn recognize_inner(
+        &self,
+        request: &OcrRequest,
+        debug: &mut impl FnMut(OcrDebugLogEntry),
+    ) -> Result<OcrRecognition, OcrError> {
         let language = languages::resolve(&request.language)?;
         let started = Instant::now();
         let image = std::fs::read(&request.image_path)?;
         let expected_main_rows = estimate_main_rows(&image);
         let image_base64 = BASE64.encode(image);
+        let mut debug = DebugReporter {
+            enabled: self.config.debug_logging,
+            request,
+            callback: debug,
+        };
         let (recognition, recognition_response, _) = Self::run_stage(
             &self.recognition_client,
             &image_base64,
             "recognition",
             &prompt::recognition(language, expected_main_rows),
             &recognition_schema(),
+            &mut debug,
             |content| validate_recognition(content, expected_main_rows, language),
         )?;
         let main_lines = recognition
@@ -198,6 +308,7 @@ impl OcrBackend for ProviderOcrBackend {
             "style",
             &prompt::whole_cue_style(language, &main_lines),
             &style_schema(),
+            &mut debug,
             validate_whole_cue_style,
         )?;
         let unreadable = recognition.unreadable;
@@ -231,6 +342,52 @@ impl OcrBackend for ProviderOcrBackend {
             raw_response,
             elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
         })
+    }
+}
+
+impl OcrBackend for ProviderOcrBackend {
+    fn backend_id(&self) -> String {
+        format!(
+            "{}:{}:{};validation={}:{}:{}",
+            self.config.recognition.provider.as_str(),
+            self.config.recognition.base_url.trim_end_matches('/'),
+            self.config.recognition.model,
+            self.config.validation.provider.as_str(),
+            self.config.validation.base_url.trim_end_matches('/'),
+            self.config.validation.model,
+        )
+    }
+
+    fn recognize(&self, request: &OcrRequest) -> Result<OcrRecognition, OcrError> {
+        self.recognize_inner(request, &mut |_| {})
+    }
+}
+
+fn debug_log_entry(
+    request: &OcrRequest,
+    client: &ProviderClient,
+    stage: &str,
+    attempt: u32,
+    status: OcrDebugStatus,
+    raw_response: Option<String>,
+    error: Option<String>,
+) -> OcrDebugLogEntry {
+    let created_at_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| {
+            u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+        });
+    OcrDebugLogEntry {
+        created_at_ms,
+        cue_id: request.cue_id,
+        cue_index: request.cue_index,
+        stage: stage.to_owned(),
+        attempt,
+        provider: client.config().provider.as_str().to_owned(),
+        model: client.config().model.clone(),
+        status,
+        raw_response,
+        error,
     }
 }
 
@@ -281,7 +438,7 @@ fn parse_json_content(content: &str) -> Result<Value, OcrError> {
         stripped.to_owned()
     };
     serde_json::from_str(&stripped)
-        .map_err(|_| OcrError::Validation("model did not return valid JSON".to_owned()))
+        .map_err(|error| OcrError::Validation(format!("model did not return valid JSON: {error}")))
 }
 
 fn validate_recognition(
@@ -523,6 +680,18 @@ fn style_schema() -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_pipeline_config_defaults_debug_logging_to_off() {
+        let provider = ProviderConfig::default();
+        let config: OcrPipelineConfig = serde_json::from_value(json!({
+            "recognition": provider.clone(),
+            "validation": provider,
+        }))
+        .expect("legacy OCR pipeline config");
+
+        assert!(!config.debug_logging);
+    }
 
     #[test]
     fn validates_and_assembles_ruby() {

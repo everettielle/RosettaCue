@@ -35,6 +35,7 @@ export type BackendEvent =
   | "ocr-progress"
   | "ocr-control-state"
   | "translation-progress"
+  | "debug-log"
 
 export type WindowMode = "welcome" | "workspace"
 
