@@ -1,14 +1,23 @@
 {
-  "name": "v3",
+  "name": "rosettacue",
   "private": true,
-  "version": "0.0.1",
+  "version": "0.1.0",
+  "description": "Turn Blu-ray image subtitles into verifiable text.",
+  "main": "dist-electron/main.js",
+  "packageManager": "pnpm@11.20.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "tsc -b && vite build",
+    "dev": "cargo build -p rosettacue-backend && vite",
+    "dev:web": "vite --mode web",
+    "build": "cargo build --release -p rosettacue-backend && tsc -b && vite build",
+    "build:backend": "cargo build --release -p rosettacue-backend",
+    "build:backend:dev": "cargo build -p rosettacue-backend",
+    "build:desktop": "tsc -b && vite build",
+    "package": "cargo build --release -p rosettacue-backend && tsc -b && vite build && electron-builder",
     "lint": "eslint .",
     "format": "prettier --write \"**/*.{ts,tsx}\"",
     "typecheck": "tsc --noEmit",
+    "test": "vitest run && cargo test --workspace",
     "preview": "vite preview"
   },
   "dependencies": {
@@ -20,6 +29,7 @@
     "lucide-react": "^1.28.0",
     "react": "^19.2.6",
     "react-dom": "^19.2.6",
+    "react-resizable-panels": "^4.12.2",
     "shadcn": "^4.16.1",
     "tailwind-merge": "^3.6.0",
     "tailwindcss": "^4",
@@ -31,6 +41,8 @@
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "@vitejs/plugin-react": "^6",
+    "electron": "^43.3.0",
+    "electron-builder": "^26.15.3",
     "eslint": "^10",
     "eslint-plugin-react-hooks": "^7.1.1",
     "eslint-plugin-react-refresh": "^0.5.2",
@@ -39,6 +51,74 @@
     "prettier-plugin-tailwindcss": "^0.8.0",
     "typescript": "~6",
     "typescript-eslint": "^8",
-    "vite": "^8"
+    "vite": "^8",
+    "vite-plugin-electron": "^1.1.1",
+    "vitest": "^4.1.10"
+  },
+  "build": {
+    "appId": "com.rosettacue.desktop",
+    "productName": "RosettaCue",
+    "asar": true,
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "dist/**",
+      "dist-electron/**",
+      "package.json"
+    ],
+    "mac": {
+      "category": "public.app-category.video",
+      "icon": "build/icon.icns",
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "extraResources": [
+        {
+          "from": "target/release/rosettacue-backend",
+          "to": "backend/rosettacue-backend"
+        },
+        {
+          "from": "resources/tools",
+          "to": "tools"
+        }
+      ]
+    },
+    "win": {
+      "icon": "build/icon.ico",
+      "target": [
+        "nsis"
+      ],
+      "extraResources": [
+        {
+          "from": "target/release/rosettacue-backend.exe",
+          "to": "backend/rosettacue-backend.exe"
+        },
+        {
+          "from": "resources/tools",
+          "to": "tools"
+        }
+      ]
+    },
+    "linux": {
+      "category": "AudioVideo",
+      "icon": "build/icon.png",
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "extraResources": [
+        {
+          "from": "target/release/rosettacue-backend",
+          "to": "backend/rosettacue-backend"
+        },
+        {
+          "from": "resources/tools",
+          "to": "tools"
+        }
+      ]
+    }
   }
 }

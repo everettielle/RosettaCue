@@ -3,5 +3,13 @@ coverage/
 .pnpm-store/
 pnpm-lock.yaml
 package-lock.json
-pnpm-lock.yaml
 yarn.lock
+
+# Build output
+dist/
+dist-electron/
+release/
+target/
+
+# Restored from skills-lock.json, not authored here
+.agents/

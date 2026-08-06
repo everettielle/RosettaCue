@@ -1,0 +1,68 @@
+name: Feature request
+description: Suggest a capability for RosettaCue
+labels: ["enhancement", "needs triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before filing, please check the
+        [out-of-scope list](https://github.com/everettielle/RosettaCue/blob/main/docs/specification.md#12-out-of-scope).
+        Video playback, disc decryption, Aegisub-style authoring, and cloud sync
+        are deliberately not part of RosettaCue.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve?
+      description: Describe the workflow that is currently painful, not the solution.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered
+      description: Including any workaround you are using today.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Project management
+        - Blu-ray source analysis
+        - PGS extraction
+        - OCR pipeline
+        - Editor / Inspector
+        - Review workflow
+        - Translation
+        - Export format
+        - Provider support
+        - CLI
+        - Packaging
+        - Localization
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: format-impact
+    attributes:
+      label: Compatibility
+      options:
+        - label: This would require a change to the `.rosettacue` project schema
+        - label: This would require a change to the sidecar protocol
+        - label: This would change the canonical JSON export format
+
+  - type: checkboxes
+    id: contribute
+    attributes:
+      label: Contribution
+      options:
+        - label: I am willing to open a pull request for this

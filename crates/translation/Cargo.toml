@@ -1,0 +1,16 @@
+[package]
+name = "rosettacue-translation"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+rosettacue-domain = { path = "../domain" }
+rosettacue-llm = { path = "../llm" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+thiserror = "2.0.19"
+
+[lints]
+workspace = true

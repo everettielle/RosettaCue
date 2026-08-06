@@ -1,0 +1,88 @@
+name: OCR quality
+description: A cue was recognized incorrectly
+labels: ["ocr", "needs triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Recognition quality depends heavily on the model you chose, so this
+        template asks for a bit more than a normal bug report. RosettaCue keeps
+        every raw model response in the project package — that is the single most
+        useful thing you can attach.
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected text vs. recognized text
+      description: The correct subtitle text, and what RosettaCue produced.
+      placeholder: |
+        Expected: Uは この世の知性を司る
+        Got:      Uは この世の知性を可る
+    validations:
+      required: true
+
+  - type: textarea
+    id: cue-image
+    attributes:
+      label: Cue image
+      description: >
+        Drag in the PNG from
+        `<project>.rosettacue/assets/cues/<track-uuid>/<index>.png`. Please only
+        attach images you are comfortable sharing publicly.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: failure-kind
+    attributes:
+      label: What went wrong
+      multiple: true
+      options:
+        - Wrong characters
+        - Dropped a line
+        - Invented text that is not in the image
+        - Missing or wrong ruby / furigana
+        - Wrong italic classification
+        - Wrong normalization (punctuation, long vowel, ellipsis)
+        - Wrong position
+        - Wrong timing
+        - Repeated retries then failure
+    validations:
+      required: true
+
+  - type: input
+    id: language
+    attributes:
+      label: Subtitle language
+      placeholder: "jpn"
+    validations:
+      required: true
+
+  - type: input
+    id: recognition-model
+    attributes:
+      label: Recognition provider and model
+      placeholder: "LM Studio / gemma-4-31b-it"
+    validations:
+      required: true
+
+  - type: input
+    id: validation-model
+    attributes:
+      label: Validation provider and model
+      placeholder: "LM Studio / gemma-4-31b-it"
+
+  - type: textarea
+    id: raw-response
+    attributes:
+      label: Raw model response
+      description: >
+        From the `ocr_attempts` table in `project.sqlite`, or the attempt detail
+        in the Inspector. Include the prompt version if you have it.
+      render: json
+
+  - type: input
+    id: prevalence
+    attributes:
+      label: How often does this happen?
+      placeholder: "Roughly 12 of 1644 cues in this track"

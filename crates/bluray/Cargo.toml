@@ -1,0 +1,18 @@
+[package]
+name = "rosettacue-bluray"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+regex = "1.13.1"
+rosettacue-domain = { path = "../domain" }
+serde = { version = "1.0.229", features = ["derive"] }
+thiserror = "2.0.19"
+
+[dev-dependencies]
+tempfile = "3.27.0"
+
+[lints]
+workspace = true

@@ -7,9 +7,13 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
+# Dependencies and build output
 node_modules
 dist
+dist-electron
 dist-ssr
+release
+target
 *.local
 
 # Editor directories and files
@@ -22,3 +26,18 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Agent skills are restored from skills-lock.json, never committed.
+# See CONTRIBUTING.md.
+.agents/
+.claude/
+.cursor/
+
+# Third-party media tools staged for packaging. Binaries and their license
+# notices are supplied per release, not tracked in the repository.
+resources/tools/*
+!resources/tools/README.txt
+
+# Local RosettaCue project packages and exported subtitles
+*.rosettacue/
+*.sup
