@@ -1,8 +1,11 @@
 use std::time::{Duration, Instant};
 
-use reqwest::blocking::{Client, RequestBuilder};
+use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
+
+mod http;
+mod providers;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -186,100 +189,8 @@ impl ProviderClient {
         &self,
         request: &CompletionRequest<'_>,
     ) -> Result<CompletionResponse, LlmError> {
-        match self.config.provider {
-            LlmProvider::Anthropic => self.complete_anthropic(request),
-            LlmProvider::LmStudio | LlmProvider::Ollama | LlmProvider::OpenAi => {
-                self.complete_openai_compatible(request)
-            }
-        }
+        providers::complete(&self.client, &self.config, request)
     }
-
-    fn complete_openai_compatible(
-        &self,
-        request: &CompletionRequest<'_>,
-    ) -> Result<CompletionResponse, LlmError> {
-        let payload = build_openai_payload(&self.config, request);
-        let endpoint = endpoint(&self.config.base_url, "chat/completions");
-        let response = authenticate(self.client.post(endpoint).json(&payload), &self.config)
-            .send()
-            .map_err(map_request_error)?;
-        parse_response(response, parse_openai_response)
-    }
-
-    fn complete_anthropic(
-        &self,
-        request: &CompletionRequest<'_>,
-    ) -> Result<CompletionResponse, LlmError> {
-        let payload = build_anthropic_payload(&self.config, request);
-        let endpoint = endpoint(&self.config.base_url, "messages");
-        let response = authenticate(self.client.post(endpoint).json(&payload), &self.config)
-            .send()
-            .map_err(map_request_error)?;
-        parse_response(response, parse_anthropic_response)
-    }
-}
-
-fn build_openai_payload(config: &ProviderConfig, request: &CompletionRequest<'_>) -> Value {
-    let mut user_content = vec![json!({ "type": "text", "text": request.user_text })];
-    if let Some(image) = request.image_png_base64 {
-        user_content.push(json!({
-            "type": "image_url",
-            "image_url": { "url": format!("data:image/png;base64,{image}") }
-        }));
-    }
-    let mut messages = vec![
-        json!({ "role": "system", "content": request.system }),
-        json!({ "role": "user", "content": user_content }),
-    ];
-    if let (Some(previous), Some(correction)) = (request.previous_response, request.correction) {
-        messages.push(json!({ "role": "assistant", "content": previous }));
-        messages.push(json!({ "role": "user", "content": correction }));
-    }
-    let mut payload = json!({
-        "model": config.model,
-        "messages": messages,
-        "temperature": 0,
-        "seed": 0,
-        "max_tokens": config.max_tokens,
-        "stream": false
-    });
-    if let Some(response_format) = request.response_format {
-        payload["response_format"] = response_format.clone();
-    }
-    payload
-}
-
-fn build_anthropic_payload(config: &ProviderConfig, request: &CompletionRequest<'_>) -> Value {
-    let mut instruction = request.user_text.to_owned();
-    if let Some(schema) = request.response_format {
-        instruction.push_str("\nReturn only JSON matching this response format:\n");
-        instruction.push_str(&schema.to_string());
-    }
-    let mut user_content = vec![json!({ "type": "text", "text": instruction })];
-    if let Some(image) = request.image_png_base64 {
-        user_content.push(json!({
-            "type": "image",
-            "source": {
-                "type": "base64",
-                "media_type": "image/png",
-                "data": image
-            }
-        }));
-    }
-    let mut messages = vec![json!({ "role": "user", "content": user_content })];
-    if let (Some(previous), Some(correction)) = (request.previous_response, request.correction) {
-        messages.push(json!({ "role": "assistant", "content": previous }));
-        messages.push(json!({ "role": "user", "content": correction }));
-    }
-    let payload = json!({
-        "model": config.model,
-        "system": request.system,
-        "messages": messages,
-        "temperature": 0,
-        "max_tokens": config.max_tokens,
-        "stream": false
-    });
-    payload
 }
 
 /// Lists models exposed by a configured provider endpoint.
@@ -311,24 +222,7 @@ pub fn list_models(
         max_attempts: 1,
     };
     let client = Client::builder().timeout(Duration::from_secs(10)).build()?;
-    let response = authenticate(client.get(endpoint(base_url, "models")), &config)
-        .send()
-        .map_err(map_request_error)?;
-    parse_response(response, |body| {
-        let payload = serde_json::from_str::<Value>(body)?;
-        let data = payload
-            .get("data")
-            .and_then(Value::as_array)
-            .ok_or_else(|| LlmError::InvalidResponse("model list data is missing".to_owned()))?;
-        let mut models = data
-            .iter()
-            .filter_map(|item| item.get("id").and_then(Value::as_str))
-            .map(|id| LlmModel { id: id.to_owned() })
-            .collect::<Vec<_>>();
-        models.sort_by(|left, right| left.id.cmp(&right.id));
-        models.dedup();
-        Ok(models)
-    })
+    providers::list_models(&client, &config)
 }
 
 #[must_use]
@@ -356,84 +250,6 @@ pub fn diagnose(
     }
 }
 
-fn authenticate(request: RequestBuilder, config: &ProviderConfig) -> RequestBuilder {
-    match config.provider {
-        LlmProvider::Anthropic => {
-            let request = request.header("anthropic-version", "2023-06-01");
-            if let Some(key) = config.api_key.as_deref().filter(|key| !key.is_empty()) {
-                request.header("x-api-key", key)
-            } else {
-                request
-            }
-        }
-        LlmProvider::LmStudio | LlmProvider::Ollama | LlmProvider::OpenAi => {
-            if let Some(key) = config.api_key.as_deref().filter(|key| !key.is_empty()) {
-                request.bearer_auth(key)
-            } else {
-                request
-            }
-        }
-    }
-}
-
-fn endpoint(base_url: &str, path: &str) -> String {
-    format!("{}/{}", base_url.trim_end_matches('/'), path)
-}
-
-fn parse_response<T>(
-    response: reqwest::blocking::Response,
-    parser: impl FnOnce(&str) -> Result<T, LlmError>,
-) -> Result<T, LlmError> {
-    let status = response.status();
-    let body = response.text().map_err(map_request_error)?;
-    if !status.is_success() {
-        return Err(LlmError::Http {
-            status: status.as_u16(),
-            message: body.chars().take(1_000).collect(),
-        });
-    }
-    parser(&body)
-}
-
-fn parse_openai_response(body: &str) -> Result<CompletionResponse, LlmError> {
-    let payload = serde_json::from_str::<Value>(body)?;
-    let content = payload
-        .pointer("/choices/0/message/content")
-        .and_then(Value::as_str)
-        .ok_or_else(|| LlmError::InvalidResponse("message content is missing".to_owned()))?;
-    Ok(CompletionResponse {
-        content: content.to_owned(),
-        model: payload
-            .get("model")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
-        usage: payload.get("usage").cloned().unwrap_or(Value::Null),
-    })
-}
-
-fn parse_anthropic_response(body: &str) -> Result<CompletionResponse, LlmError> {
-    let payload = serde_json::from_str::<Value>(body)?;
-    let content = payload
-        .get("content")
-        .and_then(Value::as_array)
-        .and_then(|blocks| {
-            blocks.iter().find_map(|block| {
-                (block.get("type").and_then(Value::as_str) == Some("text"))
-                    .then(|| block.get("text").and_then(Value::as_str))
-                    .flatten()
-            })
-        })
-        .ok_or_else(|| LlmError::InvalidResponse("text content is missing".to_owned()))?;
-    Ok(CompletionResponse {
-        content: content.to_owned(),
-        model: payload
-            .get("model")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
-        usage: payload.get("usage").cloned().unwrap_or(Value::Null),
-    })
-}
-
 fn validate_base_url(base_url: &str) -> Result<(), LlmError> {
     let url = reqwest::Url::parse(base_url)
         .map_err(|error| LlmError::InvalidConfig(error.to_string()))?;
@@ -445,14 +261,6 @@ fn validate_base_url(base_url: &str) -> Result<(), LlmError> {
     Ok(())
 }
 
-fn map_request_error(error: reqwest::Error) -> LlmError {
-    if error.is_connect() || error.is_timeout() {
-        LlmError::Unavailable(error.to_string())
-    } else {
-        LlmError::Request(error)
-    }
-}
-
 fn elapsed_ms(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
@@ -460,75 +268,6 @@ fn elapsed_ms(started: Instant) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn openai_compatible_vision_contract() {
-        let config = ProviderConfig {
-            provider: LlmProvider::OpenAi,
-            base_url: "https://api.openai.test/v1".to_owned(),
-            model: "vision-model".to_owned(),
-            api_key: Some("test-key".to_owned()),
-            timeout_seconds: 5,
-            max_tokens: 100,
-            max_attempts: 1,
-        };
-        let payload = build_openai_payload(
-            &config,
-            &CompletionRequest {
-                system: "system",
-                user_text: "read",
-                image_png_base64: Some("cG5n"),
-                response_format: Some(&json!({ "type": "json_object" })),
-                previous_response: None,
-                correction: None,
-            },
-        );
-        assert_eq!(payload["model"], "vision-model");
-        assert_eq!(payload["stream"], false);
-        assert_eq!(
-            payload.pointer("/messages/1/content/1/image_url/url"),
-            Some(&json!("data:image/png;base64,cG5n"))
-        );
-        let parsed = parse_openai_response(
-            r#"{"model":"vision-model","choices":[{"message":{"content":"{\"ok\":true}"}}],"usage":{"total_tokens":7}}"#,
-        )
-        .expect("OpenAI response");
-        assert_eq!(parsed.content, "{\"ok\":true}");
-    }
-
-    #[test]
-    fn anthropic_messages_contract() {
-        let config = ProviderConfig {
-            provider: LlmProvider::Anthropic,
-            base_url: "https://api.anthropic.test/v1".to_owned(),
-            model: "claude-test".to_owned(),
-            api_key: Some("anthropic-key".to_owned()),
-            timeout_seconds: 5,
-            max_tokens: 100,
-            max_attempts: 1,
-        };
-        let payload = build_anthropic_payload(
-            &config,
-            &CompletionRequest {
-                system: "system",
-                user_text: "read",
-                image_png_base64: Some("cG5n"),
-                response_format: Some(&json!({ "type": "json_object" })),
-                previous_response: None,
-                correction: None,
-            },
-        );
-        assert_eq!(payload["system"], "system");
-        assert_eq!(
-            payload.pointer("/messages/0/content/1/source/data"),
-            Some(&json!("cG5n"))
-        );
-        let parsed = parse_anthropic_response(
-            r#"{"model":"claude-test","content":[{"type":"text","text":"{\"ok\":true}"}],"usage":{"input_tokens":4}}"#,
-        )
-        .expect("Anthropic response");
-        assert_eq!(parsed.model.as_deref(), Some("claude-test"));
-    }
 
     #[test]
     fn remote_providers_require_keys_but_local_providers_do_not() {
