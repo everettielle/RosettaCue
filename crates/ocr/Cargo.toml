@@ -6,7 +6,7 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
-base64 = "0.22.1"
+base64 = "0.23.0"
 png = "0.18.1"
 regex = "1.13.1"
 rosettacue-domain = { path = "../domain" }
