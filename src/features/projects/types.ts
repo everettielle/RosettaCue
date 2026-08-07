@@ -200,20 +200,34 @@ export type LlmProvider = "lm_studio" | "ollama" | "open_ai" | "anthropic"
 
 export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high"
 
-export type ProviderConfig = {
-  provider: LlmProvider
+/**
+ * Provider selection plus the parameters only that provider accepts, mirroring
+ * the backend's ProviderSpec. A parameter lives on its provider's branch, so a
+ * profile carrying another provider's parameter is unrepresentable.
+ */
+export type ProviderSpec =
+  | { provider: "lm_studio" }
+  | { provider: "ollama" }
+  | {
+      provider: "open_ai"
+      /**
+       * Reasoning tokens bill at the output rate, so recognition and
+       * translation use "none".
+       */
+      reasoning_effort: ReasoningEffort
+    }
+  | { provider: "anthropic" }
+
+export type ProviderCommon = {
   base_url: string
   model: string
   api_key: string | null
   timeout_seconds: number
   max_tokens: number
   max_attempts: number
-  /**
-   * OpenAI only. Reasoning tokens bill at the output rate, so recognition and
-   * translation send "none"; the backend rejects a value on other providers.
-   */
-  reasoning_effort: ReasoningEffort | null
 }
+
+export type ProviderConfig = ProviderCommon & ProviderSpec
 
 export type OcrPipelineConfig = {
   recognition: ProviderConfig

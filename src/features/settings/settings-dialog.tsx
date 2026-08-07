@@ -51,6 +51,8 @@ import type {
   LlmProvider,
   MediaToolDiagnostic,
   ProjectSettings,
+  ProviderCommon,
+  ProviderConfig,
   ProviderDiagnostic,
   ReasoningEffort,
 } from "@/features/projects/types"
@@ -288,7 +290,7 @@ export function SettingsDialog({
     }
   }
 
-  const updateProfile = (patch: Partial<typeof profile>) => {
+  const updateProfile = (patch: Partial<ProviderCommon>) => {
     setDraft((current) => ({
       ...current,
       profiles: {
@@ -299,15 +301,22 @@ export function SettingsDialog({
     setDiagnostic(null)
   }
 
+  // Provider-specific fields exist only on their provider's branch, so they
+  // are changed by replacing the whole profile rather than patching it.
+  const replaceProfile = (next: ProviderConfig) => {
+    setDraft((current) => ({
+      ...current,
+      profiles: { ...current.profiles, [activeTask]: next },
+    }))
+    setDiagnostic(null)
+  }
+
   const changeProvider = (provider: LlmProvider) => {
-    const defaults = providerDefaults(provider)
-    updateProfile({
-      provider,
-      base_url: defaults.base_url,
-      model: "",
-      api_key: null,
-      // Carrying an effort over to a non-OpenAI provider fails validation there.
-      reasoning_effort: defaults.reasoning_effort,
+    replaceProfile({
+      ...providerDefaults(provider),
+      timeout_seconds: profile.timeout_seconds,
+      max_tokens: profile.max_tokens,
+      max_attempts: profile.max_attempts,
     })
     setModels((current) => ({ ...current, [activeTask]: [] }))
   }
@@ -807,9 +816,10 @@ export function SettingsDialog({
                       </FieldLabel>
                       <Select
                         items={reasoningEfforts}
-                        value={profile.reasoning_effort ?? "none"}
+                        value={profile.reasoning_effort}
                         onValueChange={(value) =>
-                          updateProfile({
+                          replaceProfile({
+                            ...profile,
                             reasoning_effort: value as ReasoningEffort,
                           })
                         }

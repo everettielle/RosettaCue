@@ -51,7 +51,7 @@ describe("workspace model settings persistence", () => {
 
   it("uses combined recognition when a saved setting predates the ruby profile", () => {
     localStorage.setItem(
-      "rosettacue.workspace-settings.v1",
+      "rosettacue.workspace-settings.v2",
       JSON.stringify({
         profiles: {
           ocr: { ...defaultWorkspaceSettings.profiles.ocr, model: "ocr-local" },
@@ -67,5 +67,46 @@ describe("workspace model settings persistence", () => {
     expect(restored.profiles.ruby).toEqual(
       defaultWorkspaceSettings.profiles.ruby
     )
+  })
+
+  it("resolves a stored OpenAI profile without a reasoning effort to none", () => {
+    localStorage.setItem(
+      "rosettacue.workspace-settings.v2",
+      JSON.stringify({
+        profiles: {
+          ...defaultWorkspaceSettings.profiles,
+          ocr: {
+            ...defaultWorkspaceSettings.profiles.ocr,
+            provider: "open_ai",
+            model: "gpt-5.6-luna",
+          },
+        },
+      })
+    )
+
+    const ocr = loadWorkspaceSettings().profiles.ocr
+
+    expect(ocr.provider).toBe("open_ai")
+    expect(ocr.provider === "open_ai" && ocr.reasoning_effort).toBe("none")
+  })
+
+  it("drops a reasoning effort stored on a non-OpenAI profile", () => {
+    localStorage.setItem(
+      "rosettacue.workspace-settings.v2",
+      JSON.stringify({
+        profiles: {
+          ...defaultWorkspaceSettings.profiles,
+          ocr: {
+            ...defaultWorkspaceSettings.profiles.ocr,
+            reasoning_effort: "high",
+          },
+        },
+      })
+    )
+
+    const ocr = loadWorkspaceSettings().profiles.ocr
+
+    expect(ocr.provider).toBe("lm_studio")
+    expect("reasoning_effort" in ocr).toBe(false)
   })
 })
