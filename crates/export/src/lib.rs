@@ -5,13 +5,13 @@ use std::path::PathBuf;
 use rosettacue_diagnostics::{DiagnosticEvent, DiagnosticLevel};
 use rosettacue_domain::{
     CueEditDocument, CueGeometry, CueRevision, OcrLine, ProjectMetadata, ReviewStatus, SubtitleCue,
-    SubtitlePosition, SubtitleTrack, TextStyle,
+    SubtitleTrack, TextStyle,
 };
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-pub const SUBTITLE_DOCUMENT_VERSION: u32 = 1;
+pub const SUBTITLE_DOCUMENT_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -76,7 +76,7 @@ pub struct ExportCue {
     pub index: u32,
     pub start_ms: u64,
     pub end_ms: u64,
-    pub position: SubtitlePosition,
+    /// Placement lives on each block inside `subtitle`, not here.
     pub geometry: CueGeometry,
     pub review_status: ReviewStatus,
     pub image_sha256: String,
@@ -315,7 +315,6 @@ fn export_cue(cue: &SubtitleCue, document: &CueEditDocument) -> ExportCue {
         index: cue.cue_index,
         start_ms: document.start_ms,
         end_ms: document.end_ms,
-        position: document.position,
         geometry: cue.geometry.clone(),
         review_status: cue.review_status,
         image_sha256: cue.image_sha256.clone(),
@@ -361,7 +360,7 @@ fn render_srt(cues: &[ExportCue]) -> (String, Vec<String>) {
         output.push_str(" --> ");
         output.push_str(&format_srt_timestamp(cue.end_ms));
         output.push('\n');
-        for line in &cue.subtitle.lines {
+        for line in cue.subtitle.lines() {
             output.push_str(&render_srt_line(line));
             output.push('\n');
             let unsupported_styles = line.spans.iter().any(|span| {
@@ -448,7 +447,10 @@ fn format_srt_timestamp(milliseconds: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rosettacue_domain::{OcrDocument, OcrSpan, RevisionAuthor, TextStyle};
+    use rosettacue_domain::{
+        BlockSource, OcrDocument, OcrSpan, RevisionAuthor, SubtitlePosition, TextBlock, TextStyle,
+        WritingMode,
+    };
 
     fn fixture() -> (ProjectMetadata, SubtitleTrack, SubtitleCue, CueRevision) {
         let metadata = ProjectMetadata::new("Test / Movie");
@@ -496,14 +498,17 @@ mod tests {
             model: "test".to_owned(),
             language: "jpn".to_owned(),
             unreadable: false,
-            lines: vec![OcrLine {
-                text: "物語＆字幕".to_owned(),
-                spans: vec![OcrSpan::Text {
+            blocks: vec![TextBlock::whole_cue(
+                &cue.geometry,
+                vec![OcrLine {
                     text: "物語＆字幕".to_owned(),
-                    styles: vec![TextStyle::Italic],
-                    color: None,
+                    spans: vec![OcrSpan::Text {
+                        text: "物語＆字幕".to_owned(),
+                        styles: vec![TextStyle::Italic],
+                        color: None,
+                    }],
                 }],
-            }],
+            )],
             normalizations: Vec::new(),
         };
         let revision = CueRevision {
@@ -513,7 +518,6 @@ mod tests {
             document: CueEditDocument {
                 start_ms: cue.start_ms,
                 end_ms: cue.end_ms,
-                position: cue.position,
                 subtitle,
             },
             created_at: OffsetDateTime::now_utc(),
@@ -543,6 +547,7 @@ mod tests {
         let json_path = temporary.path().join("Test _ Movie.jpn.json");
         let json = fs::read_to_string(json_path).expect("read JSON");
         assert!(json.contains("\"rosettacue-subtitles\""));
+        assert!(json.contains("\"version\": 2"));
         assert!(json.contains("\"position\": \"bottom-center\""));
         let srt =
             fs::read_to_string(temporary.path().join("Test _ Movie.jpn.srt")).expect("read SRT");
@@ -582,7 +587,6 @@ mod tests {
             index: 7,
             start_ms: 1_000,
             end_ms: 2_000,
-            position: SubtitlePosition::BottomCenter,
             geometry: CueGeometry {
                 canvas_width: 1920,
                 canvas_height: 1080,
@@ -603,16 +607,27 @@ mod tests {
                 model: "test".to_owned(),
                 language: "jpn".to_owned(),
                 unreadable: false,
-                lines: vec![OcrLine {
-                    text: "物語".to_owned(),
-                    spans: vec![OcrSpan::Ruby {
-                        base: "物語".to_owned(),
-                        annotations: vec![rosettacue_domain::RubyAnnotation {
-                            text: "ものがたり".to_owned(),
-                            position: rosettacue_domain::RubyPosition::Over,
+                blocks: vec![TextBlock {
+                    bounds: rosettacue_domain::BlockBounds {
+                        x: 700,
+                        y: 850,
+                        width: 520,
+                        height: 80,
+                    },
+                    writing_mode: WritingMode::HorizontalTb,
+                    position: SubtitlePosition::BottomCenter,
+                    source: BlockSource::Detected,
+                    lines: vec![OcrLine {
+                        text: "物語".to_owned(),
+                        spans: vec![OcrSpan::Ruby {
+                            base: "物語".to_owned(),
+                            annotations: vec![rosettacue_domain::RubyAnnotation {
+                                text: "ものがたり".to_owned(),
+                                position: rosettacue_domain::RubyPosition::Over,
+                            }],
+                            styles: vec![TextStyle::Superscript],
+                            color: Some("#FF0000".to_owned()),
                         }],
-                        styles: vec![TextStyle::Superscript],
-                        color: Some("#FF0000".to_owned()),
                     }],
                 }],
                 normalizations: Vec::new(),

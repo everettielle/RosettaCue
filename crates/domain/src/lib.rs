@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-pub const PROJECT_SCHEMA_VERSION: u32 = 1;
+pub const PROJECT_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct ProjectMetadata {
@@ -510,6 +510,14 @@ pub struct SubtitleCue {
     pub review_status: ReviewStatus,
 }
 
+/// Which side of the text a ruby annotation sits on, relative to the writing
+/// direction.
+///
+/// These are the CSS `ruby-position` values and carry the CSS meaning: `Over`
+/// is the block-start side, which is above the line in horizontal writing and
+/// to the right of the column in vertical writing. Keeping them relative is
+/// what stops the illegal combinations — "above" in vertical writing — from
+/// being representable, and lets the renderer hand the value straight to CSS.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RubyPosition {
@@ -593,10 +601,47 @@ pub struct OcrLine {
 pub struct NormalizationRecord {
     pub rule: String,
     pub field: String,
+    /// The 1-based block the change happened in.
+    pub block_index: u32,
+    /// The 1-based line within that block.
     pub line_index: u32,
     pub annotation_index: Option<u32>,
     pub before: String,
     pub after: String,
+}
+
+/// One spatially separated run of subtitle text within a cue.
+///
+/// A cue bitmap can hold several of these — an interjection in the corner over
+/// dialogue at the bottom — each with its own place on screen and its own
+/// writing direction. A cue with a single run is a document with one block, not
+/// a special case.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TextBlock {
+    /// Canvas coordinates.
+    pub bounds: BlockBounds,
+    pub writing_mode: WritingMode,
+    /// Where the block sits on screen. Derived from `bounds`, overridable by a person.
+    pub position: SubtitlePosition,
+    pub source: BlockSource,
+    /// Rows in horizontal writing, columns in vertical writing, in reading order.
+    pub lines: Vec<OcrLine>,
+}
+
+impl TextBlock {
+    /// The block a cue collapses to when its layout was not separated:
+    /// horizontal, covering the whole bitmap, placed where the cue is.
+    #[must_use]
+    pub fn whole_cue(geometry: &CueGeometry, lines: Vec<OcrLine>) -> Self {
+        Self {
+            bounds: geometry.bounds(),
+            writing_mode: WritingMode::HorizontalTb,
+            position: geometry.position(),
+            source: BlockSource::WholeCue,
+            lines,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -606,18 +651,49 @@ pub struct OcrDocument {
     pub model: String,
     pub language: String,
     pub unreadable: bool,
-    pub lines: Vec<OcrLine>,
+    /// Blocks in reading order.
+    pub blocks: Vec<TextBlock>,
     pub normalizations: Vec<NormalizationRecord>,
 }
 
 impl OcrDocument {
+    /// Every line of every block, in reading order.
+    pub fn lines(&self) -> impl Iterator<Item = &OcrLine> {
+        self.blocks.iter().flat_map(|block| block.lines.iter())
+    }
+
+    #[must_use]
+    pub fn line_count(&self) -> usize {
+        self.blocks.iter().map(|block| block.lines.len()).sum()
+    }
+
+    /// The single position a format that allows only one has to use.
+    ///
+    /// This is the first block in reading order — a lossy answer whenever the
+    /// cue has more than one block, which is why callers that use it warn.
+    #[must_use]
+    pub fn primary_position(&self) -> Option<SubtitlePosition> {
+        self.blocks.first().map(|block| block.position)
+    }
+
+    /// Lines joined by newline, with a blank line between blocks.
+    ///
+    /// The blank line is load-bearing: without it a block boundary and a line
+    /// break inside a block read the same.
     #[must_use]
     pub fn plain_text(&self) -> String {
-        self.lines
+        self.blocks
             .iter()
-            .map(|line| line.text.as_str())
+            .map(|block| {
+                block
+                    .lines
+                    .iter()
+                    .map(|line| line.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
             .collect::<Vec<_>>()
-            .join("\n")
+            .join("\n\n")
     }
 }
 
@@ -630,11 +706,15 @@ pub struct CueRecognition {
     pub created_at: OffsetDateTime,
 }
 
+/// A cue as a person edits it.
+///
+/// Placement is not here: a cue can hold blocks in different places, so a
+/// single cue-level position would have to disagree with at least one of them.
+/// Each block carries its own.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct CueEditDocument {
     pub start_ms: u64,
     pub end_ms: u64,
-    pub position: SubtitlePosition,
     pub subtitle: OcrDocument,
 }
 
@@ -805,11 +885,36 @@ mod tests {
     }
 }
 
+/// How much a recorded validation issue should cost the result.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ValidationSeverity {
+    /// Worth recording, not worth anyone's time.
+    Info,
+    /// The result stands, but a person should look at it.
+    Warning,
+}
+
+/// A check that did not pass but did not invalidate the result either.
+///
+/// Hard checks reject and retry; these are the soft ones, kept with the attempt
+/// so a reviewer can see what the pipeline was unsure about.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct ValidationIssue {
     pub code: String,
+    pub severity: ValidationSeverity,
     pub stage: String,
     pub path: Option<String>,
     pub message: String,
     pub codepoint: Option<String>,
+}
+
+impl ValidationIssue {
+    /// Whether any of these issues is worth putting the cue in front of a person.
+    #[must_use]
+    pub fn any_needs_review(issues: &[Self]) -> bool {
+        issues
+            .iter()
+            .any(|issue| issue.severity == ValidationSeverity::Warning)
+    }
 }

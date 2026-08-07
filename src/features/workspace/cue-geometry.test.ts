@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest"
 
+import type { TextBlock } from "@/features/projects/types"
 import {
+  blockSubtitlePlacement,
   cueImagePlacement,
-  cueSubtitlePlacement,
 } from "@/features/workspace/cue-geometry"
 
 describe("cueImagePlacement", () => {
@@ -48,7 +49,7 @@ describe("cueImagePlacement", () => {
   })
 })
 
-describe("cueSubtitlePlacement", () => {
+describe("blockSubtitlePlacement", () => {
   const geometry = {
     canvas_width: 1920,
     canvas_height: 1080,
@@ -62,10 +63,17 @@ describe("cueSubtitlePlacement", () => {
     inferred_end: false,
   }
 
-  it("uses the source bounding box and canvas for an unchanged position", () => {
-    expect(
-      cueSubtitlePlacement(geometry, "bottom-center", "bottom-center", 2)
-    ).toMatchObject({
+  const block = (patch: Partial<TextBlock> = {}): TextBlock => ({
+    bounds: { x: 476, y: 730, width: 1004, height: 203 },
+    writing_mode: "horizontal_tb",
+    position: "bottom-center",
+    source: "detected",
+    lines: [],
+    ...patch,
+  })
+
+  it("uses the block's own bounds while it sits where it was recognized", () => {
+    expect(blockSubtitlePlacement(geometry, block(), false, 2)).toMatchObject({
       canvasWidth: 1920,
       canvasHeight: 1080,
       x: 476,
@@ -78,10 +86,10 @@ describe("cueSubtitlePlacement", () => {
   })
 
   it("moves the same-sized box when the semantic position is edited", () => {
-    const placement = cueSubtitlePlacement(
+    const placement = blockSubtitlePlacement(
       geometry,
-      "bottom-center",
-      "top-left",
+      block({ position: "top-left" }),
+      true,
       2
     )
     expect(placement.x).toBeCloseTo(67.2)
@@ -89,5 +97,18 @@ describe("cueSubtitlePlacement", () => {
     expect(placement.width).toBe(1004)
     expect(placement.height).toBe(203)
     expect(placement.alignItems).toBe("flex-start")
+  })
+
+  it("spaces a vertical block by column width instead of line height", () => {
+    const vertical = block({
+      writing_mode: "vertical_rl",
+      bounds: { x: 990, y: 21, width: 104, height: 216 },
+      position: "top-right",
+    })
+
+    const placement = blockSubtitlePlacement(geometry, vertical, false, 2)
+
+    expect(placement.lineHeight).toBe(52)
+    expect(placement.x).toBe(990)
   })
 })

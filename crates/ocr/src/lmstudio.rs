@@ -5,7 +5,8 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use rosettacue_diagnostics::{DiagnosticEvent, DiagnosticLevel};
 use rosettacue_domain::{
-    NormalizationRecord, OcrDocument, OcrLine, OcrSpan, RubyAnnotation, RubyPosition, TextStyle,
+    NormalizationRecord, OcrDocument, OcrLine, OcrSpan, RubyAnnotation, RubyPosition, TextBlock,
+    TextStyle,
 };
 use rosettacue_llm::{
     CompletionRequest, CompletionResponse, LlmModel, LlmProvider, ProviderClient, ProviderConfig,
@@ -387,7 +388,7 @@ impl ProviderOcrBackend {
                 model,
                 language: language.code.to_owned(),
                 unreadable,
-                lines,
+                blocks: vec![TextBlock::whole_cue(&request.geometry, lines)],
                 normalizations,
             },
             raw_response,
@@ -693,6 +694,7 @@ fn assemble_lines(
             &mut records,
             text_events,
             "annotation_text",
+            1,
             annotation.line_index,
             Some(annotation_index + 1),
         );
@@ -700,6 +702,7 @@ fn assemble_lines(
             &mut records,
             base_events,
             "annotation_base",
+            1,
             annotation.line_index,
             Some(annotation_index + 1),
         );
@@ -723,7 +726,7 @@ fn assemble_lines(
         let line_index = u32::try_from(line_offset + 1)
             .map_err(|_| OcrError::Validation("too many OCR lines".to_owned()))?;
         let (text, events) = language.normalize(&raw_line.text)?;
-        add_records(&mut records, events, "text", line_index, None);
+        add_records(&mut records, events, "text", 1, line_index, None);
         let spans = assemble_spans(
             &text,
             by_line.remove(&line_index).unwrap_or_default(),
@@ -814,12 +817,14 @@ fn add_records(
     records: &mut Vec<NormalizationRecord>,
     events: Vec<NormalizationEvent>,
     field: &str,
+    block_index: u32,
     line_index: u32,
     annotation_index: Option<usize>,
 ) {
     records.extend(events.into_iter().map(|event| NormalizationRecord {
         rule: event.rule.to_owned(),
         field: field.to_owned(),
+        block_index,
         line_index,
         annotation_index: annotation_index.and_then(|index| u32::try_from(index).ok()),
         before: event.before,

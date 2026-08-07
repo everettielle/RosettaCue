@@ -520,11 +520,10 @@ impl ProjectStore {
         let timestamp = OffsetDateTime::now_utc().unix_timestamp();
         let now = OffsetDateTime::from_unix_timestamp(timestamp)
             .map_err(|_| ProjectError::InvalidRecord("OCR revision timestamp".to_owned()))?;
-        let (start_ms, end_ms, position) = self.cue_edit_base(cue_id)?;
+        let (start_ms, end_ms) = self.cue_edit_base(cue_id)?;
         let document_json = serde_json::to_string(&CueEditDocument {
             start_ms,
             end_ms,
-            position,
             subtitle: document.clone(),
         })?;
         let elapsed_ms = i64::try_from(elapsed_ms)
@@ -1303,22 +1302,13 @@ impl ProjectStore {
         Ok(())
     }
 
-    fn cue_edit_base(
-        &self,
-        cue_id: Uuid,
-    ) -> Result<(u64, u64, rosettacue_domain::SubtitlePosition), ProjectError> {
+    fn cue_edit_base(&self, cue_id: Uuid) -> Result<(u64, u64), ProjectError> {
         let row = self
             .connection
             .query_row(
-                "SELECT start_ms, end_ms, geometry FROM cues WHERE id = ?1",
+                "SELECT start_ms, end_ms FROM cues WHERE id = ?1",
                 params![cue_id.to_string()],
-                |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, i64>(1)?,
-                        row.get::<_, String>(2)?,
-                    ))
-                },
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
             )
             .optional()?
             .ok_or(ProjectError::CueNotFound)?;
@@ -1326,8 +1316,7 @@ impl ProjectStore {
             .map_err(|_| ProjectError::InvalidRecord("cue start time".to_owned()))?;
         let end_ms = u64::try_from(row.1)
             .map_err(|_| ProjectError::InvalidRecord("cue end time".to_owned()))?;
-        let geometry = serde_json::from_str::<CueGeometry>(&row.2)?;
-        Ok((start_ms, end_ms, geometry.position()))
+        Ok((start_ms, end_ms))
     }
 
     #[must_use]
@@ -1617,7 +1606,7 @@ fn parse_timestamp(value: &str, field: &str) -> Result<OffsetDateTime, ProjectEr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rosettacue_domain::{OcrLine, OcrSpan, PROJECT_SCHEMA_VERSION, TextStyle};
+    use rosettacue_domain::{OcrLine, OcrSpan, PROJECT_SCHEMA_VERSION, TextBlock, TextStyle};
 
     #[test]
     fn clones_project_with_new_identity_and_origin() {
@@ -1780,14 +1769,17 @@ mod tests {
             model: "test-model".to_owned(),
             language: "jpn".to_owned(),
             unreadable: false,
-            lines: vec![OcrLine {
-                text: "字幕".to_owned(),
-                spans: vec![OcrSpan::Text {
+            blocks: vec![TextBlock::whole_cue(
+                &cue.geometry,
+                vec![OcrLine {
                     text: "字幕".to_owned(),
-                    styles: Vec::new(),
-                    color: None,
+                    spans: vec![OcrSpan::Text {
+                        text: "字幕".to_owned(),
+                        styles: Vec::new(),
+                        color: None,
+                    }],
                 }],
-            }],
+            )],
             normalizations: Vec::new(),
         };
         let recognition = created
@@ -1798,16 +1790,18 @@ mod tests {
         let edited = CueEditDocument {
             start_ms: 1_050,
             end_ms: 2_600,
-            position: rosettacue_domain::SubtitlePosition::BottomCenter,
             subtitle: OcrDocument {
-                lines: vec![OcrLine {
-                    text: "字幕です".to_owned(),
-                    spans: vec![OcrSpan::Text {
+                blocks: vec![TextBlock::whole_cue(
+                    &cue.geometry,
+                    vec![OcrLine {
                         text: "字幕です".to_owned(),
-                        styles: vec![TextStyle::Italic],
-                        color: None,
+                        spans: vec![OcrSpan::Text {
+                            text: "字幕です".to_owned(),
+                            styles: vec![TextStyle::Italic],
+                            color: None,
+                        }],
                     }],
-                }],
+                )],
                 ..document.clone()
             },
         };
@@ -1854,12 +1848,14 @@ mod tests {
         );
         let mut translated = edited.clone();
         translated.subtitle.language = "eng".to_owned();
-        translated.subtitle.lines[0].text = "These are subtitles.".to_owned();
-        translated.subtitle.lines[0].spans = vec![OcrSpan::Text {
+        translated.subtitle.blocks[0].lines[0] = OcrLine {
             text: "These are subtitles.".to_owned(),
-            styles: Vec::new(),
-            color: None,
-        }];
+            spans: vec![OcrSpan::Text {
+                text: "These are subtitles.".to_owned(),
+                styles: Vec::new(),
+                color: None,
+            }],
+        };
         let translation = created
             .save_translation_revision(cue.id, &translated)
             .expect("save translation revision");

@@ -2,7 +2,7 @@ use std::time::Instant;
 
 use rosettacue_diagnostics::{DiagnosticEvent, DiagnosticLevel};
 use rosettacue_domain::{
-    CueEditDocument, OcrDocument, OcrLine, OcrSpan, ProperNounMapping, TextStyle,
+    CueEditDocument, OcrDocument, OcrLine, OcrSpan, ProperNounMapping, TextBlock, TextStyle,
 };
 use rosettacue_llm::{CompletionRequest, ProviderClient, ProviderConfig};
 use serde::Deserialize;
@@ -89,7 +89,7 @@ impl SubtitleTranslator {
         if request.target_language.trim().is_empty() {
             return Err(TranslationError::MissingTargetLanguage);
         }
-        if request.document.subtitle.lines.is_empty() {
+        if request.document.subtitle.line_count() == 0 {
             return Err(TranslationError::EmptySource);
         }
         let started = Instant::now();
@@ -112,7 +112,7 @@ impl SubtitleTranslator {
                         "model": self.client.config().model,
                         "source_language": request.source_language,
                         "target_language": request.target_language,
-                        "line_count": request.document.subtitle.lines.len(),
+                        "line_count": request.document.subtitle.line_count(),
                         "proper_noun_count": request.proper_nouns.len()
                     })
                 },
@@ -126,7 +126,7 @@ impl SubtitleTranslator {
                 previous_response: previous_response.as_deref(),
                 correction: correction.as_deref(),
             })?;
-            match validate_response(&response.content, request.document.subtitle.lines.len()) {
+            match validate_response(&response.content, request.document.subtitle.line_count()) {
                 Ok(lines) => {
                     let document = translated_document(
                         request.document,
@@ -146,7 +146,7 @@ impl SubtitleTranslator {
                             serde_json::json!({
                                 "attempt": attempt,
                                 "candidate_content": response.content,
-                                "line_count": document.subtitle.lines.len()
+                                "line_count": document.subtitle.line_count()
                             })
                         },
                     );
@@ -244,8 +244,7 @@ fn translation_prompt(request: &TranslationRequest<'_>) -> String {
     let lines = request
         .document
         .subtitle
-        .lines
-        .iter()
+        .lines()
         .enumerate()
         .map(|(index, line)| json!({ "line_index": index + 1, "text": line.text }))
         .collect::<Vec<_>>();
@@ -342,37 +341,51 @@ fn translated_document(
     config: &ProviderConfig,
     target_language: &str,
 ) -> CueEditDocument {
-    let translated_lines = source
+    // Placement, direction, and provenance are facts about the source bitmap,
+    // so translation carries them through untouched and replaces only text.
+    let mut translated = lines.into_iter();
+    let blocks = source
         .subtitle
-        .lines
+        .blocks
         .iter()
-        .zip(lines)
-        .map(|(source_line, text)| {
-            let styles = uniform_line_styles(source_line);
-            let color = uniform_line_color(source_line);
-            OcrLine {
-                spans: vec![OcrSpan::Text {
-                    text: text.clone(),
-                    styles,
-                    color,
-                }],
-                text,
-            }
+        .map(|block| TextBlock {
+            bounds: block.bounds,
+            writing_mode: block.writing_mode,
+            position: block.position,
+            source: block.source,
+            lines: block
+                .lines
+                .iter()
+                .zip(translated.by_ref())
+                .map(|(source_line, text)| translated_line(source_line, text))
+                .collect(),
         })
         .collect();
     CueEditDocument {
         start_ms: source.start_ms,
         end_ms: source.end_ms,
-        position: source.position,
         subtitle: OcrDocument {
             prompt_version: TRANSLATION_PROMPT_VERSION.to_owned(),
             provider: config.provider.as_str().to_owned(),
             model: config.model.clone(),
             language: target_language.to_owned(),
             unreadable: false,
-            lines: translated_lines,
+            blocks,
             normalizations: Vec::new(),
         },
+    }
+}
+
+fn translated_line(source: &OcrLine, text: String) -> OcrLine {
+    let styles = uniform_line_styles(source);
+    let color = uniform_line_color(source);
+    OcrLine {
+        spans: vec![OcrSpan::Text {
+            text: text.clone(),
+            styles,
+            color,
+        }],
+        text,
     }
 }
 
@@ -398,29 +411,47 @@ fn uniform_line_color(line: &OcrLine) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use rosettacue_domain::{SubtitlePosition, TextStyle};
+    use rosettacue_domain::{BlockBounds, BlockSource, SubtitlePosition, TextStyle, WritingMode};
 
     use super::*;
+
+    fn block(writing_mode: WritingMode, lines: Vec<OcrLine>) -> TextBlock {
+        TextBlock {
+            bounds: BlockBounds {
+                x: 20,
+                y: 900,
+                width: 400,
+                height: 60,
+            },
+            writing_mode,
+            position: SubtitlePosition::BottomCenter,
+            source: BlockSource::Detected,
+            lines,
+        }
+    }
+
+    fn line(text: &str) -> OcrLine {
+        OcrLine {
+            text: text.to_owned(),
+            spans: vec![OcrSpan::Text {
+                text: text.to_owned(),
+                styles: vec![TextStyle::Italic],
+                color: Some("#FFFF00".to_owned()),
+            }],
+        }
+    }
 
     fn source() -> CueEditDocument {
         CueEditDocument {
             start_ms: 100,
             end_ms: 900,
-            position: SubtitlePosition::BottomCenter,
             subtitle: OcrDocument {
                 prompt_version: "ocr".to_owned(),
                 provider: "lmstudio".to_owned(),
                 model: "vision".to_owned(),
                 language: "jpn".to_owned(),
                 unreadable: false,
-                lines: vec![OcrLine {
-                    text: "物語は続く。".to_owned(),
-                    spans: vec![OcrSpan::Text {
-                        text: "物語は続く。".to_owned(),
-                        styles: vec![TextStyle::Italic],
-                        color: Some("#FFFF00".to_owned()),
-                    }],
-                }],
+                blocks: vec![block(WritingMode::HorizontalTb, vec![line("物語は続く。")])],
                 normalizations: Vec::new(),
             },
         }
@@ -440,15 +471,43 @@ mod tests {
         let translated = translated_document(&source(), lines, &config, "eng");
         assert_eq!(translated.start_ms, 100);
         assert_eq!(translated.subtitle.language, "eng");
+        let first = translated
+            .subtitle
+            .lines()
+            .next()
+            .expect("a translated line");
+        assert_eq!(first.spans[0].styles(), &[TextStyle::Italic]);
+        assert_eq!(first.spans[0].color(), Some("#FFFF00"));
+        assert_eq!(first.text, "The story continues.");
+    }
+
+    #[test]
+    fn keeps_every_block_boundary_placement_and_direction() {
+        let mut document = source();
+        document.subtitle.blocks = vec![
+            block(WritingMode::VerticalRl, vec![line("冷たい！")]),
+            block(
+                WritingMode::HorizontalTb,
+                vec![line("ながく"), line("おもいけるかな")],
+            ),
+        ];
+        let lines = validate_response(
+            r#"{"lines":[{"line_index":1,"text":"Cold!"},{"line_index":2,"text":"Long"},{"line_index":3,"text":"I wished"}]}"#,
+            3,
+        )
+        .expect("translation response");
+
+        let translated = translated_document(&document, lines, &ProviderConfig::default(), "eng");
+
+        assert_eq!(translated.subtitle.blocks.len(), 2);
         assert_eq!(
-            translated.subtitle.lines[0].spans[0].styles(),
-            &[TextStyle::Italic]
+            translated.subtitle.blocks[0].writing_mode,
+            WritingMode::VerticalRl,
+            "writing mode is a fact about the source bitmap, not the text"
         );
-        assert_eq!(
-            translated.subtitle.lines[0].spans[0].color(),
-            Some("#FFFF00")
-        );
-        assert_eq!(translated.subtitle.lines[0].text, "The story continues.");
+        assert_eq!(translated.subtitle.blocks[0].lines.len(), 1);
+        assert_eq!(translated.subtitle.blocks[1].lines.len(), 2);
+        assert_eq!(translated.subtitle.blocks[1].lines[1].text, "I wished");
     }
 
     #[test]

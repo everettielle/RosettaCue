@@ -12,7 +12,7 @@ pub use lmstudio::{
     diagnose_provider, list_lmstudio_models, list_provider_models,
 };
 pub use prompt::PROMPT_VERSION;
-use rosettacue_domain::OcrDocument;
+use rosettacue_domain::{CueGeometry, OcrDocument};
 pub use rosettacue_layout::{CueLayout, LayoutOptions};
 pub use rosettacue_llm::{
     LlmProvider, ProviderConfig, ProviderDiagnostic, ProviderSpec, ReasoningEffort,
@@ -40,6 +40,8 @@ pub struct OcrRequest {
     pub image_path: PathBuf,
     pub image_sha256: String,
     pub language: String,
+    /// Needed to place recognized blocks on the canvas, and to size the crops.
+    pub geometry: CueGeometry,
 }
 
 #[derive(Debug, Clone)]

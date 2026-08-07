@@ -115,13 +115,45 @@ export type OcrLine = {
   spans: OcrSpan[]
 }
 
+/**
+ * The axis a block's text runs along, named for the CSS `writing-mode` values
+ * it maps to. Ruby positions are relative to this: `over` is above the line in
+ * horizontal writing and to the right of the column in vertical writing, which
+ * is what CSS already does with `ruby-position`.
+ */
+export type WritingMode = "horizontal_tb" | "vertical_rl"
+
+export type BlockBounds = {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+export type BlockSource = "detected" | "whole_cue" | "manual"
+
+/**
+ * One spatially separated run of text inside a cue. A cue with a single run is
+ * a document with one block, not a special case.
+ */
+export type TextBlock = {
+  /** Canvas coordinates. */
+  bounds: BlockBounds
+  writing_mode: WritingMode
+  position: SubtitlePosition
+  source: BlockSource
+  /** Rows in horizontal writing, columns in vertical writing, in reading order. */
+  lines: OcrLine[]
+}
+
 export type OcrDocument = {
   prompt_version: string
   provider: string
   model: string
   language: string
   unreadable: boolean
-  lines: OcrLine[]
+  /** Blocks in reading order. */
+  blocks: TextBlock[]
   normalizations: unknown[]
 }
 
@@ -163,7 +195,6 @@ export type CueRevision = {
   document: {
     start_ms: number
     end_ms: number
-    position: SubtitlePosition
     subtitle: OcrDocument
   }
   created_at: string
