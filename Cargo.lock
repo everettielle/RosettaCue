@@ -1342,6 +1342,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rosettacue-layout"
+version = "0.1.0"
+dependencies = [
+ "png",
+ "rosettacue-domain",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
 name = "rosettacue-llm"
 version = "0.1.0"
 dependencies = [

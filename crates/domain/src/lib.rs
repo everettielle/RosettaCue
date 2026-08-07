@@ -352,12 +352,77 @@ pub enum SubtitlePosition {
     BottomRight,
 }
 
-impl CueGeometry {
-    /// Classifies the cue center into a deterministic 3×3 screen region.
+/// The axis along which a text block flows.
+///
+/// The names follow the CSS Writing Modes values so that the renderer can pass
+/// them straight to `writing-mode`, and so that [`RubyPosition`] keeps the same
+/// direction-relative meaning the CSS specification gives `ruby-position`.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WritingMode {
+    /// Lines stack top to bottom, glyphs run left to right.
+    #[default]
+    HorizontalTb,
+    /// Glyphs run top to bottom, columns stack right to left.
+    VerticalRl,
+}
+
+impl WritingMode {
     #[must_use]
-    pub fn position(&self) -> SubtitlePosition {
-        let horizontal = axis_region(self.x, self.width, self.canvas_width);
-        let vertical = axis_region(self.y, self.height, self.canvas_height);
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::HorizontalTb => "horizontal_tb",
+            Self::VerticalRl => "vertical_rl",
+        }
+    }
+
+    /// Whether recognition receives one item per column instead of per row.
+    #[must_use]
+    pub const fn is_vertical(self) -> bool {
+        matches!(self, Self::VerticalRl)
+    }
+}
+
+/// Where a text block's boundary came from.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BlockSource {
+    /// Layout analysis separated it from the rest of the cue.
+    Detected,
+    /// Analysis was not confident, so the whole cue is treated as one block.
+    WholeCue,
+    /// A person created the block or moved its boundary.
+    Manual,
+}
+
+impl BlockSource {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Detected => "detected",
+            Self::WholeCue => "whole_cue",
+            Self::Manual => "manual",
+        }
+    }
+}
+
+/// An axis-aligned rectangle in canvas coordinates.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct BlockBounds {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl BlockBounds {
+    /// Classifies the rectangle's center into a deterministic 3×3 screen region.
+    ///
+    /// Cue-level and block-level placement share this one grid rule.
+    #[must_use]
+    pub fn position(self, canvas_width: u32, canvas_height: u32) -> SubtitlePosition {
+        let horizontal = axis_region(self.x, self.width, canvas_width);
+        let vertical = axis_region(self.y, self.height, canvas_height);
         match (vertical, horizontal) {
             (0, 0) => SubtitlePosition::TopLeft,
             (0, 1) => SubtitlePosition::TopCenter,
@@ -368,6 +433,50 @@ impl CueGeometry {
             (_, 0) => SubtitlePosition::BottomLeft,
             (_, 1) => SubtitlePosition::BottomCenter,
             (_, _) => SubtitlePosition::BottomRight,
+        }
+    }
+}
+
+impl CueGeometry {
+    /// Classifies the cue center into a deterministic 3×3 screen region.
+    #[must_use]
+    pub fn position(&self) -> SubtitlePosition {
+        self.bounds()
+            .position(self.canvas_width, self.canvas_height)
+    }
+
+    /// The cue's tight bitmap rectangle in canvas coordinates.
+    #[must_use]
+    pub const fn bounds(&self) -> BlockBounds {
+        BlockBounds {
+            x: self.x,
+            y: self.y,
+            width: self.width,
+            height: self.height,
+        }
+    }
+
+    /// Moves a rectangle measured in cue-PNG pixels into canvas coordinates.
+    ///
+    /// The exported PNG can be larger than the tight bitmap rectangle, and the
+    /// extra margin is shared evenly on both sides of each axis. The renderer
+    /// derives the same origin in `cueImagePlacement`; keeping the arithmetic
+    /// here means every consumer inherits one definition of it.
+    #[must_use]
+    pub const fn canvas_bounds(&self, in_image: BlockBounds) -> BlockBounds {
+        let horizontal_padding = self.image_width.saturating_sub(self.width) / 2;
+        let vertical_padding = self.image_height.saturating_sub(self.height) / 2;
+        BlockBounds {
+            x: self
+                .x
+                .saturating_sub(horizontal_padding)
+                .saturating_add(in_image.x),
+            y: self
+                .y
+                .saturating_sub(vertical_padding)
+                .saturating_add(in_image.y),
+            width: in_image.width,
+            height: in_image.height,
         }
     }
 }
@@ -603,6 +712,71 @@ mod tests {
             };
             assert_eq!(geometry.position(), expected);
         }
+    }
+
+    #[test]
+    fn block_bounds_and_cue_geometry_share_one_grid() {
+        let geometry = CueGeometry {
+            canvas_width: 300,
+            canvas_height: 300,
+            x: 240,
+            y: 40,
+            width: 20,
+            height: 20,
+            image_width: 20,
+            image_height: 20,
+            forced: false,
+            inferred_end: false,
+        };
+
+        assert_eq!(
+            geometry.position(),
+            geometry.bounds().position(300, 300),
+            "a cue is just the block that covers it"
+        );
+        assert_eq!(geometry.position(), SubtitlePosition::TopRight);
+    }
+
+    #[test]
+    fn canvas_bounds_undoes_the_even_png_padding() {
+        let geometry = CueGeometry {
+            canvas_width: 1920,
+            canvas_height: 1080,
+            x: 700,
+            y: 850,
+            width: 520,
+            height: 80,
+            image_width: 552,
+            image_height: 112,
+            forced: false,
+            inferred_end: false,
+        };
+
+        // The PNG carries 16px of margin per side horizontally and vertically,
+        // so its origin sits at (684, 834) on the canvas.
+        let origin = geometry.canvas_bounds(BlockBounds {
+            x: 0,
+            y: 0,
+            width: 552,
+            height: 112,
+        });
+        assert_eq!((origin.x, origin.y), (684, 834));
+
+        let block = geometry.canvas_bounds(BlockBounds {
+            x: 16,
+            y: 16,
+            width: 100,
+            height: 40,
+        });
+        assert_eq!(
+            block,
+            BlockBounds {
+                x: 700,
+                y: 850,
+                width: 100,
+                height: 40
+            }
+        );
     }
 
     #[test]
