@@ -816,11 +816,13 @@ export function SettingsDialog({
                       </FieldLabel>
                       <Select
                         items={reasoningEfforts}
-                        value={profile.reasoning_effort}
+                        value={profile.provider_options.reasoning_effort}
                         onValueChange={(value) =>
                           replaceProfile({
                             ...profile,
-                            reasoning_effort: value as ReasoningEffort,
+                            provider_options: {
+                              reasoning_effort: value as ReasoningEffort,
+                            },
                           })
                         }
                       >

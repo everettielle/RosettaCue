@@ -51,7 +51,7 @@ describe("workspace model settings persistence", () => {
 
   it("uses combined recognition when a saved setting predates the ruby profile", () => {
     localStorage.setItem(
-      "rosettacue.workspace-settings.v2",
+      "rosettacue.workspace-settings.v3",
       JSON.stringify({
         profiles: {
           ocr: { ...defaultWorkspaceSettings.profiles.ocr, model: "ocr-local" },
@@ -69,9 +69,9 @@ describe("workspace model settings persistence", () => {
     )
   })
 
-  it("resolves a stored OpenAI profile without a reasoning effort to none", () => {
+  it("resolves a stored OpenAI profile without provider options to none", () => {
     localStorage.setItem(
-      "rosettacue.workspace-settings.v2",
+      "rosettacue.workspace-settings.v3",
       JSON.stringify({
         profiles: {
           ...defaultWorkspaceSettings.profiles,
@@ -87,18 +87,20 @@ describe("workspace model settings persistence", () => {
     const ocr = loadWorkspaceSettings().profiles.ocr
 
     expect(ocr.provider).toBe("open_ai")
-    expect(ocr.provider === "open_ai" && ocr.reasoning_effort).toBe("none")
+    expect(
+      ocr.provider === "open_ai" && ocr.provider_options.reasoning_effort
+    ).toBe("none")
   })
 
-  it("drops a reasoning effort stored on a non-OpenAI profile", () => {
+  it("drops provider options stored on a provider that takes none", () => {
     localStorage.setItem(
-      "rosettacue.workspace-settings.v2",
+      "rosettacue.workspace-settings.v3",
       JSON.stringify({
         profiles: {
           ...defaultWorkspaceSettings.profiles,
           ocr: {
             ...defaultWorkspaceSettings.profiles.ocr,
-            reasoning_effort: "high",
+            provider_options: { reasoning_effort: "high" },
           },
         },
       })
@@ -107,6 +109,6 @@ describe("workspace model settings persistence", () => {
     const ocr = loadWorkspaceSettings().profiles.ocr
 
     expect(ocr.provider).toBe("lm_studio")
-    expect("reasoning_effort" in ocr).toBe(false)
+    expect("provider_options" in ocr).toBe(false)
   })
 })

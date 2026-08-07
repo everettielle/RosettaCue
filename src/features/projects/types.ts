@@ -202,19 +202,22 @@ export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high"
 
 /**
  * Provider selection plus the parameters only that provider accepts, mirroring
- * the backend's ProviderSpec. A parameter lives on its provider's branch, so a
- * profile carrying another provider's parameter is unrepresentable.
+ * the backend's ProviderSpec. A parameter lives on its provider's branch under
+ * `provider_options`, so a profile carrying another provider's parameter is
+ * unrepresentable and the common namespace stays free of specific fields.
  */
 export type ProviderSpec =
   | { provider: "lm_studio" }
   | { provider: "ollama" }
   | {
       provider: "open_ai"
-      /**
-       * Reasoning tokens bill at the output rate, so recognition and
-       * translation use "none".
-       */
-      reasoning_effort: ReasoningEffort
+      provider_options: {
+        /**
+         * Reasoning tokens bill at the output rate, so recognition and
+         * translation use "none".
+         */
+        reasoning_effort: ReasoningEffort
+      }
     }
   | { provider: "anthropic" }
 

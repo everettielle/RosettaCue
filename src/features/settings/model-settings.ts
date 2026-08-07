@@ -7,8 +7,9 @@ import type {
 } from "@/features/projects/types"
 import * as m from "@/paraglide/messages.js"
 
-// v2: profiles switched to the tagged ProviderSpec shape; v1 data is ignored.
-const STORAGE_KEY = "rosettacue.workspace-settings.v2"
+// v3: provider-specific parameters moved under provider_options; earlier
+// shapes are ignored.
+const STORAGE_KEY = "rosettacue.workspace-settings.v3"
 
 export type ModelTask = "ocr" | "ruby" | "validation" | "translation"
 
@@ -51,7 +52,10 @@ function normalizeSpec(
 ): ProviderSpec {
   switch (provider) {
     case "open_ai":
-      return { provider, reasoning_effort: storedEffort ?? "none" }
+      return {
+        provider,
+        provider_options: { reasoning_effort: storedEffort ?? "none" },
+      }
     case "lm_studio":
     case "ollama":
     case "anthropic":
@@ -94,7 +98,9 @@ function mergeProfile(
 ): ProviderConfig {
   const provider = value?.provider ?? fallback.provider
   const storedEffort =
-    value && "reasoning_effort" in value ? value.reasoning_effort : undefined
+    value && "provider_options" in value
+      ? value.provider_options?.reasoning_effort
+      : undefined
   // Common fields are picked by name so that stored data cannot smuggle
   // another provider's parameters past the spec normalization.
   return {
