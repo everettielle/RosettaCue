@@ -332,13 +332,29 @@ export type ExportOptions = {
   base_name: string | null
 }
 
+/** What a lossy export format could not carry. */
+export type ExportWarningCode =
+  | "multiple_blocks_flattened"
+  | "vertical_writing_lost"
+  | "block_position_lost"
+  | "ruby_flattened"
+  | "text_color_omitted"
+  | "baseline_styles_omitted"
+
+export type ExportWarning = {
+  code: ExportWarningCode
+  cue_index: number
+  /** English fallback. The UI localizes from `code` and `cue_index`. */
+  message: string
+}
+
 export type ExportResult = {
   track_id: string
   artifacts: Array<{
     format: ExportFormat
     path: string
     cue_count: number
-    warnings: string[]
+    warnings: ExportWarning[]
   }>
   skipped_cues: number
 }

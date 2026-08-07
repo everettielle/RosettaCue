@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::path::PathBuf;
 
@@ -83,12 +83,83 @@ pub struct ExportCue {
     pub subtitle: rosettacue_domain::OcrDocument,
 }
 
+/// What a lossy format could not carry.
+///
+/// The code is the identity; the message is an English fallback for logs and
+/// the CLI. A user interface localizes from the code and the cue index rather
+/// than displaying a sentence this crate wrote, which is why the cue index is a
+/// field and not only part of the prose.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExportWarning {
+    pub code: ExportWarningCode,
+    pub cue_index: u32,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum ExportWarningCode {
+    /// A cue's several blocks were joined into one run of lines.
+    MultipleBlocksFlattened,
+    /// A vertical block was written out as horizontal lines.
+    VerticalWritingLost,
+    /// Blocks sat in different places and the format holds only one.
+    BlockPositionLost,
+    /// Ruby was reduced to its base text.
+    RubyFlattened,
+    /// Text colors were dropped.
+    TextColorOmitted,
+    /// Strikethrough, superscript, or subscript were dropped.
+    BaselineStylesOmitted,
+}
+
+impl ExportWarningCode {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::MultipleBlocksFlattened => "multiple_blocks_flattened",
+            Self::VerticalWritingLost => "vertical_writing_lost",
+            Self::BlockPositionLost => "block_position_lost",
+            Self::RubyFlattened => "ruby_flattened",
+            Self::TextColorOmitted => "text_color_omitted",
+            Self::BaselineStylesOmitted => "baseline_styles_omitted",
+        }
+    }
+
+    const fn description(self) -> &'static str {
+        match self {
+            Self::MultipleBlocksFlattened => {
+                "holds several text blocks; portable SRT output joins them into one run of lines"
+            }
+            Self::VerticalWritingLost => {
+                "holds vertical text; portable SRT output writes it as horizontal lines"
+            }
+            Self::BlockPositionLost => {
+                "places its blocks differently; portable SRT output keeps no position at all"
+            }
+            Self::RubyFlattened => "contains ruby annotations; SRT keeps only the base text",
+            Self::TextColorOmitted => "contains text colors; portable SRT output omits them",
+            Self::BaselineStylesOmitted => {
+                "contains strikethrough or baseline styles; portable SRT output omits them"
+            }
+        }
+    }
+
+    fn at(self, cue_index: u32) -> ExportWarning {
+        ExportWarning {
+            code: self,
+            cue_index,
+            message: format!("Cue {cue_index} {}", self.description()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExportArtifact {
     pub format: ExportFormat,
     pub path: String,
     pub cue_count: u32,
-    pub warnings: Vec<String>,
+    pub warnings: Vec<ExportWarning>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -350,7 +421,7 @@ fn safe_file_stem(value: &str) -> String {
         .collect()
 }
 
-fn render_srt(cues: &[ExportCue]) -> (String, Vec<String>) {
+fn render_srt(cues: &[ExportCue]) -> (String, Vec<ExportWarning>) {
     let mut output = String::new();
     let mut warnings = Vec::new();
     for (position, cue) in cues.iter().enumerate() {
@@ -360,43 +431,57 @@ fn render_srt(cues: &[ExportCue]) -> (String, Vec<String>) {
         output.push_str(" --> ");
         output.push_str(&format_srt_timestamp(cue.end_ms));
         output.push('\n');
-        for line in cue.subtitle.lines() {
-            output.push_str(&render_srt_line(line));
-            output.push('\n');
-            let unsupported_styles = line.spans.iter().any(|span| {
-                span.styles().iter().any(|style| {
-                    matches!(
-                        style,
-                        TextStyle::Strikethrough | TextStyle::Superscript | TextStyle::Subscript
-                    )
-                })
-            });
-            if unsupported_styles {
-                warnings.push(format!(
-                    "Cue {} contains strikethrough or baseline styles; portable SRT output omits them",
-                    cue.index
-                ));
+        // One entry per kind of loss, not one per line that suffered it: a cue
+        // with ruby on every line used to produce the same sentence every time.
+        let mut lost = BTreeSet::new();
+        if cue.subtitle.blocks.len() > 1 {
+            lost.insert(ExportWarningCode::MultipleBlocksFlattened);
+        }
+        if cue
+            .subtitle
+            .blocks
+            .iter()
+            .any(|block| block.position != cue.subtitle.blocks[0].position)
+        {
+            lost.insert(ExportWarningCode::BlockPositionLost);
+        }
+        for block in &cue.subtitle.blocks {
+            if block.writing_mode.is_vertical() {
+                lost.insert(ExportWarningCode::VerticalWritingLost);
             }
-            if line.spans.iter().any(|span| span.color().is_some()) {
-                warnings.push(format!(
-                    "Cue {} contains text colors; portable SRT output omits them",
-                    cue.index
-                ));
-            }
-            if line
-                .spans
-                .iter()
-                .any(|span| matches!(span, rosettacue_domain::OcrSpan::Ruby { .. }))
-            {
-                warnings.push(format!(
-                    "Cue {} contains ruby annotations; SRT keeps only the base text",
-                    cue.index
-                ));
+            for line in &block.lines {
+                output.push_str(&render_srt_line(line));
+                output.push('\n');
+                lost.extend(line_losses(line));
             }
         }
+        warnings.extend(lost.into_iter().map(|code| code.at(cue.index)));
         output.push('\n');
     }
     (output, warnings)
+}
+
+fn line_losses(line: &OcrLine) -> impl Iterator<Item = ExportWarningCode> {
+    let baseline = line.spans.iter().any(|span| {
+        span.styles().iter().any(|style| {
+            matches!(
+                style,
+                TextStyle::Strikethrough | TextStyle::Superscript | TextStyle::Subscript
+            )
+        })
+    });
+    let color = line.spans.iter().any(|span| span.color().is_some());
+    let ruby = line
+        .spans
+        .iter()
+        .any(|span| matches!(span, rosettacue_domain::OcrSpan::Ruby { .. }));
+    [
+        baseline.then_some(ExportWarningCode::BaselineStylesOmitted),
+        color.then_some(ExportWarningCode::TextColorOmitted),
+        ruby.then_some(ExportWarningCode::RubyFlattened),
+    ]
+    .into_iter()
+    .flatten()
 }
 
 fn render_srt_line(line: &OcrLine) -> String {
@@ -580,9 +665,9 @@ mod tests {
         assert_eq!(render_srt_line(&line), "通常<b><i>強調</i></b>通常");
     }
 
-    #[test]
-    fn flattens_ruby_and_baseline_styles_with_explicit_warnings() {
-        let cue = ExportCue {
+    /// A cue that loses something in every way SRT can lose it.
+    fn flattening_cue() -> ExportCue {
+        ExportCue {
             id: Uuid::new_v4(),
             index: 7,
             start_ms: 1_000,
@@ -632,25 +717,63 @@ mod tests {
                 }],
                 normalizations: Vec::new(),
             },
-        };
+        }
+    }
 
+    #[test]
+    fn flattens_ruby_and_baseline_styles_with_explicit_warnings() {
+        let cue = flattening_cue();
         let (rendered, warnings) = render_srt(&[cue]);
         assert!(rendered.contains("物語"));
         assert!(!rendered.contains("ものがたり"));
-        assert!(
+        assert_eq!(
             warnings
                 .iter()
-                .any(|warning| warning.contains("baseline styles"))
+                .map(|warning| warning.code)
+                .collect::<Vec<_>>(),
+            [
+                ExportWarningCode::RubyFlattened,
+                ExportWarningCode::TextColorOmitted,
+                ExportWarningCode::BaselineStylesOmitted,
+            ]
         );
-        assert!(
-            warnings
-                .iter()
-                .any(|warning| warning.contains("ruby annotations"))
-        );
-        assert!(
-            warnings
-                .iter()
-                .any(|warning| warning.contains("text colors"))
-        );
+        assert!(warnings.iter().all(|warning| warning.cue_index == 7));
+    }
+
+    #[test]
+    fn reports_each_kind_of_loss_once_per_cue() {
+        let mut cue = flattening_cue();
+        let block = cue.subtitle.blocks[0].clone();
+        cue.subtitle.blocks = vec![block.clone(), block];
+
+        let (_, warnings) = render_srt(&[cue]);
+
+        let ruby = warnings
+            .iter()
+            .filter(|warning| warning.code == ExportWarningCode::RubyFlattened)
+            .count();
+        assert_eq!(ruby, 1, "one cue, one sentence about ruby");
+    }
+
+    #[test]
+    fn names_what_flattening_several_blocks_costs() {
+        let mut cue = flattening_cue();
+        let horizontal = cue.subtitle.blocks[0].clone();
+        let vertical = TextBlock {
+            writing_mode: WritingMode::VerticalRl,
+            position: SubtitlePosition::TopRight,
+            ..horizontal.clone()
+        };
+        cue.subtitle.blocks = vec![vertical, horizontal];
+
+        let (_, warnings) = render_srt(&[cue]);
+        let codes = warnings
+            .iter()
+            .map(|warning| warning.code)
+            .collect::<Vec<_>>();
+
+        assert!(codes.contains(&ExportWarningCode::MultipleBlocksFlattened));
+        assert!(codes.contains(&ExportWarningCode::VerticalWritingLost));
+        assert!(codes.contains(&ExportWarningCode::BlockPositionLost));
     }
 }

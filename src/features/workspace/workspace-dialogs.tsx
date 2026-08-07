@@ -46,6 +46,7 @@ import type {
   ExportFormat,
   ExportOptions,
   ExportResult,
+  ExportWarning,
   ExportScope,
   PgsExtractionProgress,
   ProjectDocument,
@@ -55,6 +56,30 @@ import type {
 import { desktop } from "@/lib/desktop"
 import { projectNameError } from "@/lib/project-name"
 import * as m from "@/paraglide/messages.js"
+
+/**
+ * Turns an export warning into a sentence in the user's language.
+ *
+ * The backend sends a code and a cue index; the English text it also sends is
+ * for logs and the CLI, and reaching for it here would put the choice of
+ * language back in Rust's hands.
+ */
+function exportWarningMessage(warning: ExportWarning) {
+  const messages: Record<ExportWarning["code"], (index: number) => string> = {
+    multiple_blocks_flattened: (index) =>
+      m.export_warning_multiple_blocks_flattened({ index }),
+    vertical_writing_lost: (index) =>
+      m.export_warning_vertical_writing_lost({ index }),
+    block_position_lost: (index) =>
+      m.export_warning_block_position_lost({ index }),
+    ruby_flattened: (index) => m.export_warning_ruby_flattened({ index }),
+    text_color_omitted: (index) =>
+      m.export_warning_text_color_omitted({ index }),
+    baseline_styles_omitted: (index) =>
+      m.export_warning_baseline_styles_omitted({ index }),
+  }
+  return messages[warning.code]?.(warning.cue_index) ?? warning.message
+}
 
 function parentDirectory(path: string) {
   const normalized = path.replaceAll("\\", "/")
@@ -743,13 +768,30 @@ export function ExportDialog({
           <div className="flex flex-col gap-3 rounded-xl border p-4">
             <p className="font-medium">{m.export_complete()}</p>
             {result.artifacts.map((artifact) => (
-              <div key={artifact.format} className="text-sm">
-                <Badge variant="secondary" className="mr-2 uppercase">
-                  {artifact.format}
-                </Badge>
-                <span className="break-all text-muted-foreground">
-                  {artifact.path}
-                </span>
+              <div
+                key={artifact.format}
+                className="flex flex-col gap-1 text-sm"
+              >
+                <div>
+                  <Badge variant="secondary" className="mr-2 uppercase">
+                    {artifact.format}
+                  </Badge>
+                  <span className="break-all text-muted-foreground">
+                    {artifact.path}
+                  </span>
+                </div>
+                {artifact.warnings.length > 0 && (
+                  <div className="flex flex-col gap-0.5 pl-1">
+                    <p className="text-xs font-medium">{m.export_warnings()}</p>
+                    <ul className="list-disc pl-4 text-xs text-muted-foreground">
+                      {artifact.warnings.map((warning) => (
+                        <li key={`${warning.code}-${warning.cue_index}`}>
+                          {exportWarningMessage(warning)}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
               </div>
             ))}
           </div>
