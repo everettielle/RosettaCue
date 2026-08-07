@@ -52,6 +52,7 @@ import type {
   MediaToolDiagnostic,
   ProjectSettings,
   ProviderDiagnostic,
+  ReasoningEffort,
 } from "@/features/projects/types"
 import {
   providerDefaults,
@@ -81,6 +82,14 @@ const providers: Array<{ value: LlmProvider; label: string }> = [
   { value: "ollama", label: "Ollama" },
   { value: "open_ai", label: "OpenAI API" },
   { value: "anthropic", label: "Anthropic API" },
+]
+
+const reasoningEfforts: Array<{ value: ReasoningEffort; label: string }> = [
+  { value: "none", label: "none" },
+  { value: "minimal", label: "minimal" },
+  { value: "low", label: "low" },
+  { value: "medium", label: "medium" },
+  { value: "high", label: "high" },
 ]
 
 const tasks: Array<{ value: ModelTask; label: string }> = [
@@ -297,6 +306,8 @@ export function SettingsDialog({
       base_url: defaults.base_url,
       model: "",
       api_key: null,
+      // Carrying an effort over to a non-OpenAI provider fails validation there.
+      reasoning_effort: defaults.reasoning_effort,
     })
     setModels((current) => ({ ...current, [activeTask]: [] }))
   }
@@ -789,6 +800,44 @@ export function SettingsDialog({
                       {m.settings_model_description()}
                     </FieldDescription>
                   </Field>
+                  {profile.provider === "open_ai" && (
+                    <Field>
+                      <FieldLabel htmlFor={`reasoning-effort-${activeTask}`}>
+                        {m.settings_reasoning_effort()}
+                      </FieldLabel>
+                      <Select
+                        items={reasoningEfforts}
+                        value={profile.reasoning_effort ?? "none"}
+                        onValueChange={(value) =>
+                          updateProfile({
+                            reasoning_effort: value as ReasoningEffort,
+                          })
+                        }
+                      >
+                        <SelectTrigger
+                          id={`reasoning-effort-${activeTask}`}
+                          className="w-full"
+                        >
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectGroup>
+                            {reasoningEfforts.map((effort) => (
+                              <SelectItem
+                                key={effort.value}
+                                value={effort.value}
+                              >
+                                {effort.label}
+                              </SelectItem>
+                            ))}
+                          </SelectGroup>
+                        </SelectContent>
+                      </Select>
+                      <FieldDescription>
+                        {m.settings_reasoning_effort_description()}
+                      </FieldDescription>
+                    </Field>
+                  )}
                 </FieldGroup>
                 <div className="flex items-center gap-3">
                   <Button

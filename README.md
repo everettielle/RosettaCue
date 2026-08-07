@@ -98,6 +98,29 @@ same vision model as Text OCR or a dedicated model tuned for small annotations.
 Translation runs afterward on text. API keys live in renderer memory for the session only;
 they are never written to the project package, preferences, logs, or exports.
 
+### Remote model cost
+
+Cue images are tightly cropped to the glyph bounding box, not full frames, so a
+typical cue costs a few hundred image tokens rather than a few thousand. Across
+a two-hour film the recurring instruction text — stage guidance plus the response
+schema, identical for every cue — dominates the image, so RosettaCue sends it as
+a cacheable prefix and keeps only the row estimate and recognized lines in the
+per-cue turn.
+
+Because the profiles are independent, the cheap stages can run on a cheap model.
+Style recognition is a two-value classification and does not need a frontier
+model; translation benefits from one.
+
+OpenAI reasoning models bill reasoning tokens at the output rate, and the
+server-side default is not `none`. OCR gains nothing from deliberation, so every
+OpenAI profile defaults to `reasoning_effort: none` — leaving it unset is the
+single largest avoidable cost on that provider. Override per run with
+`--reasoning-effort`, or per profile in Settings → Models.
+
+Enable debug logging to see per-stage `input_tokens`, `output_tokens`,
+`cache_read_input_tokens`, and `reasoning_tokens`; measure a short run before
+committing to a model rather than extrapolating from published rates.
+
 ## Status
 
 **Pre-1.0.** The project format is at schema version 1 and RosettaCue ships **no

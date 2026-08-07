@@ -26,6 +26,7 @@ export function providerDefaults(provider: LlmProvider): ProviderConfig {
     timeout_seconds: 120,
     max_tokens: 512,
     max_attempts: 2,
+    reasoning_effort: provider === "open_ai" ? "none" : null,
   }
 }
 
@@ -53,6 +54,11 @@ function mergeProfile(
     ...value,
     provider,
     api_key: null,
+    // Resolved after the spreads: the fallback profile carries another
+    // provider's value, and profiles stored before this field existed carry
+    // none at all. The backend rejects an effort on any provider but OpenAI.
+    reasoning_effort:
+      provider === "open_ai" ? (value?.reasoning_effort ?? "none") : null,
   }
 }
 

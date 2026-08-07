@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 use rosettacue_core::{
     Application, ExportFormat, ExportOptions, ExportScope, LlmProvider, OcrPipelineConfig,
-    ProviderConfig,
+    ProviderConfig, ReasoningEffort,
 };
 
 #[derive(Debug, Parser)]
@@ -41,6 +41,8 @@ enum Command {
         base_url: String,
         #[arg(long)]
         api_key_env: Option<String>,
+        #[arg(long, value_enum)]
+        reasoning_effort: Option<CliReasoningEffort>,
         #[arg(long)]
         cue_id: Vec<uuid::Uuid>,
         #[arg(long)]
@@ -59,6 +61,53 @@ enum Command {
         #[arg(long)]
         name: Option<String>,
     },
+}
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+enum CliReasoningEffort {
+    None,
+    Minimal,
+    Low,
+    Medium,
+    High,
+}
+
+impl From<CliReasoningEffort> for ReasoningEffort {
+    fn from(value: CliReasoningEffort) -> Self {
+        match value {
+            CliReasoningEffort::None => Self::None,
+            CliReasoningEffort::Minimal => Self::Minimal,
+            CliReasoningEffort::Low => Self::Low,
+            CliReasoningEffort::Medium => Self::Medium,
+            CliReasoningEffort::High => Self::High,
+        }
+    }
+}
+
+/// Applies an explicit reasoning effort to the `OpenAI` profiles in a pipeline.
+///
+/// Other providers reject the field, so they are skipped rather than failed —
+/// a pipeline may legitimately mix `OpenAI` with a local or Anthropic stage. The
+/// flag is only an error when it would reach nothing at all.
+fn apply_reasoning_effort(
+    configs: &mut [&mut ProviderConfig],
+    effort: Option<CliReasoningEffort>,
+) -> anyhow::Result<()> {
+    let Some(effort) = effort else {
+        return Ok(());
+    };
+    let mut applied = false;
+    for config in configs {
+        if config.provider == LlmProvider::OpenAi {
+            config.reasoning_effort = Some(effort.into());
+            applied = true;
+        }
+    }
+    anyhow::ensure!(
+        applied,
+        "--reasoning-effort applies to openai profiles only, and none are configured"
+    );
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
@@ -118,6 +167,10 @@ struct OcrRunArgs {
     validation_base_url: Option<String>,
     #[arg(long)]
     validation_api_key_env: Option<String>,
+    /// Applies to every `OpenAI` profile in the pipeline. Reasoning tokens bill at
+    /// the output rate, so recognition defaults to `none`.
+    #[arg(long, value_enum)]
+    reasoning_effort: Option<CliReasoningEffort>,
     #[arg(long, default_value = "jpn")]
     language: String,
     #[arg(long)]
@@ -307,16 +360,18 @@ fn run_command(app: Application, command: Command) -> anyhow::Result<()> {
             model,
             base_url,
             api_key_env,
+            reasoning_effort,
             cue_id,
             overwrite,
         } => {
-            let config = ProviderConfig {
+            let mut config = ProviderConfig {
                 provider: provider.into(),
                 base_url,
                 model,
                 api_key: read_api_key(api_key_env.as_deref())?,
                 ..ProviderConfig::for_provider(provider.into())
             };
+            apply_reasoning_effort(&mut [&mut config], reasoning_effort)?;
             let result = app.translate_cues(
                 project,
                 (!cue_id.is_empty()).then_some(cue_id),
@@ -371,78 +426,87 @@ fn run_ocr_command(app: Application, command: OcrCommand) -> anyhow::Result<()> 
                 ))?
             );
         }
-        OcrCommand::Run(args) => {
-            let OcrRunArgs {
-                project,
-                provider,
-                model,
-                base_url,
-                api_key_env,
-                separate_ruby,
-                ruby_provider,
-                ruby_model,
-                ruby_base_url,
-                ruby_api_key_env,
-                validation_provider,
-                validation_model,
-                validation_base_url,
-                validation_api_key_env,
-                language,
-                cue_id,
-                overwrite,
-            } = *args;
-            let recognition = ProviderConfig {
-                provider: provider.into(),
-                base_url,
-                model,
-                api_key: read_api_key(api_key_env.as_deref())?,
-                ..ProviderConfig::for_provider(provider.into())
-            };
-            let ruby = if separate_ruby {
-                let ruby_provider = ruby_provider.unwrap_or(provider);
-                Some(task_provider_config(
-                    ruby_provider,
-                    provider,
-                    ruby_base_url,
-                    ruby_model,
-                    read_api_key(ruby_api_key_env.as_deref())?,
-                    &recognition,
-                ))
-            } else {
-                None
-            };
-            let validation_provider = validation_provider.unwrap_or(provider);
-            let validation = ProviderConfig {
-                provider: validation_provider.into(),
-                base_url: validation_base_url.unwrap_or_else(|| recognition.base_url.clone()),
-                model: validation_model.unwrap_or_else(|| recognition.model.clone()),
-                api_key: read_api_key(validation_api_key_env.as_deref())?
-                    .or_else(|| recognition.api_key.clone()),
-                ..ProviderConfig::for_provider(validation_provider.into())
-            };
-            let selected = (!cue_id.is_empty()).then_some(cue_id);
-            let result = app.recognize_ocr(
-                project,
-                selected,
-                &language,
-                overwrite,
-                &OcrPipelineConfig {
-                    recognition,
-                    ruby,
-                    validation,
-                },
-                || true,
-                |progress| {
-                    eprint!(
-                        "\rOCR {}/{} ({})",
-                        progress.current, progress.total, progress.phase
-                    );
-                },
-            )?;
-            eprintln!();
-            println!("{}", serde_json::to_string_pretty(&result)?);
-        }
+        OcrCommand::Run(args) => run_ocr_pipeline(app, *args)?,
     }
+    Ok(())
+}
+
+fn run_ocr_pipeline(app: Application, args: OcrRunArgs) -> anyhow::Result<()> {
+    let OcrRunArgs {
+        project,
+        provider,
+        model,
+        base_url,
+        api_key_env,
+        separate_ruby,
+        ruby_provider,
+        ruby_model,
+        ruby_base_url,
+        ruby_api_key_env,
+        validation_provider,
+        validation_model,
+        validation_base_url,
+        validation_api_key_env,
+        reasoning_effort,
+        language,
+        cue_id,
+        overwrite,
+    } = args;
+    let mut recognition = ProviderConfig {
+        provider: provider.into(),
+        base_url,
+        model,
+        api_key: read_api_key(api_key_env.as_deref())?,
+        ..ProviderConfig::for_provider(provider.into())
+    };
+    let mut ruby = if separate_ruby {
+        let ruby_provider = ruby_provider.unwrap_or(provider);
+        Some(task_provider_config(
+            ruby_provider,
+            provider,
+            ruby_base_url,
+            ruby_model,
+            read_api_key(ruby_api_key_env.as_deref())?,
+            &recognition,
+        ))
+    } else {
+        None
+    };
+    let validation_provider = validation_provider.unwrap_or(provider);
+    let mut validation = ProviderConfig {
+        provider: validation_provider.into(),
+        base_url: validation_base_url.unwrap_or_else(|| recognition.base_url.clone()),
+        model: validation_model.unwrap_or_else(|| recognition.model.clone()),
+        api_key: read_api_key(validation_api_key_env.as_deref())?
+            .or_else(|| recognition.api_key.clone()),
+        ..ProviderConfig::for_provider(validation_provider.into())
+    };
+    let mut targets = vec![&mut recognition];
+    targets.extend(ruby.as_mut());
+    targets.push(&mut validation);
+    apply_reasoning_effort(&mut targets, reasoning_effort)?;
+    drop(targets);
+    let selected = (!cue_id.is_empty()).then_some(cue_id);
+    let result = app.recognize_ocr(
+        project,
+        selected,
+        &language,
+        overwrite,
+        &OcrPipelineConfig {
+            recognition,
+            ruby,
+            validation,
+        },
+        || true,
+        |progress| {
+            eprint!(
+                "\rOCR {}/{} ({})",
+                progress.current, progress.total, progress.phase
+            );
+        },
+    )?;
+    eprintln!();
+    println!("{}", serde_json::to_string_pretty(&result)?);
     Ok(())
 }
 

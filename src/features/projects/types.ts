@@ -198,6 +198,8 @@ export type PgsExtractionResult = {
 
 export type LlmProvider = "lm_studio" | "ollama" | "open_ai" | "anthropic"
 
+export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high"
+
 export type ProviderConfig = {
   provider: LlmProvider
   base_url: string
@@ -206,6 +208,11 @@ export type ProviderConfig = {
   timeout_seconds: number
   max_tokens: number
   max_attempts: number
+  /**
+   * OpenAI only. Reasoning tokens bill at the output rate, so recognition and
+   * translation send "none"; the backend rejects a value on other providers.
+   */
+  reasoning_effort: ReasoningEffort | null
 }
 
 export type OcrPipelineConfig = {

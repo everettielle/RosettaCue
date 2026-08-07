@@ -148,6 +148,8 @@
   "settings_media_tools_origin_system": "System",
   "settings_model": "Model",
   "settings_model_description": "Refresh to load models from this provider. A saved model remains selectable while the provider is offline.",
+  "settings_reasoning_effort": "Reasoning effort",
+  "settings_reasoning_effort_description": "OpenAI reasoning models only. Reasoning tokens are billed at the output rate; recognition and translation need none of it, so \"none\" is the default.",
   "settings_models": "Models",
   "settings_ocr_language": "OCR language",
   "settings_phase_1": "Phase 1 · Main text recognition",
