@@ -56,7 +56,6 @@ import type {
   ExportResult,
   OcrDocument,
   OcrJobResult,
-  OcrLine,
   OcrProgress,
   PgsExtractionProgress,
   PgsExtractionResult,
@@ -65,7 +64,9 @@ import type {
   SourceImportResult,
   SubtitleCue,
   SubtitlePosition,
+  TextBlock,
   TranslationJobResult,
+  WritingMode,
   TranslationProgress,
 } from "@/features/projects/types"
 import {
@@ -84,11 +85,14 @@ import {
   SourceImportDialog,
 } from "@/features/workspace/workspace-dialogs"
 import {
+  blockSubtitlePlacement,
   cueImagePlacement,
-  cueSubtitlePlacement,
 } from "@/features/workspace/cue-geometry"
 import { SubtitleContentEditor } from "@/features/workspace/subtitle-content-editor"
-import { RenderedSubtitle } from "@/features/workspace/rendered-subtitle"
+import {
+  RenderedBlock,
+  RenderedSubtitle,
+} from "@/features/workspace/rendered-subtitle"
 import { normalizeOcrLines } from "@/features/workspace/subtitle-spans"
 import { desktop } from "@/lib/desktop"
 import { cn } from "@/lib/utils"
@@ -243,11 +247,14 @@ const ribbonTabs: Array<{
 
 type OcrControlState = "idle" | "running" | "paused" | "stopping"
 
+/**
+ * A cue as it is being edited. Placement is per block, so there is no cue-level
+ * position here — the draft is the block list plus the cue's own timing.
+ */
 type CueEditDraft = {
-  lines: OcrLine[]
+  blocks: TextBlock[]
   start: string
   end: string
-  position: SubtitlePosition
 }
 
 const subtitlePositions: SubtitlePosition[] = [
@@ -261,6 +268,14 @@ const subtitlePositions: SubtitlePosition[] = [
   "bottom-center",
   "bottom-right",
 ]
+
+const writingModes: WritingMode[] = ["horizontal_tb", "vertical_rl"]
+
+function writingModeLabel(value: WritingMode) {
+  return value === "vertical_rl"
+    ? m.workspace_writing_mode_vertical()
+    : m.workspace_writing_mode_horizontal()
+}
 
 function subtitlePositionLabel(value: SubtitlePosition) {
   const labels: Record<SubtitlePosition, () => string> = {
@@ -329,7 +344,11 @@ function parseTimestamp(value: string) {
 }
 
 function plainText(document: OcrDocument | null) {
-  return document?.lines.map((line) => line.text).join("\n") ?? ""
+  return (
+    document?.blocks
+      .map((block) => block.lines.map((line) => line.text).join("\n"))
+      .join("\n\n") ?? ""
+  )
 }
 
 function latestRevisionForCue(revisions: CueRevision[], cueId: string) {
@@ -578,7 +597,6 @@ export function ProjectWorkspace({
               document: {
                 start_ms: cue.start_ms,
                 end_ms: cue.end_ms,
-                position: cue.position,
                 subtitle: recognition.document,
               },
               created_at: recognition.created_at,
@@ -705,42 +723,28 @@ export function ProjectWorkspace({
   const baseStart =
     selectedRevision?.document.start_ms ?? selectedCue?.start_ms ?? 0
   const baseEnd = selectedRevision?.document.end_ms ?? selectedCue?.end_ms ?? 0
-  const basePosition =
-    selectedRevision?.document.position ??
-    selectedCue?.position ??
-    "bottom-center"
   const cueDraft = React.useMemo<CueEditDraft | null>(
     () =>
       activeCueId && selectedCue
         ? (draftByCue[activeCueId] ?? {
-            lines: selectedDocument?.lines ?? [],
+            blocks: selectedDocument?.blocks ?? [],
             start: formatTimestamp(baseStart),
             end: formatTimestamp(baseEnd),
-            position: basePosition,
           })
         : null,
-    [
-      activeCueId,
-      baseEnd,
-      basePosition,
-      baseStart,
-      draftByCue,
-      selectedCue,
-      selectedDocument,
-    ]
+    [activeCueId, baseEnd, baseStart, draftByCue, selectedCue, selectedDocument]
   )
   const previewDocument = React.useMemo(() => {
     if (!selectedDocument || !cueDraft) return selectedDocument
-    return { ...selectedDocument, lines: cueDraft.lines }
+    return { ...selectedDocument, blocks: cueDraft.blocks }
   }, [cueDraft, selectedDocument])
   const draftChanged = Boolean(
     cueDraft &&
     selectedDocument &&
-    (JSON.stringify(cueDraft.lines) !==
-      JSON.stringify(selectedDocument.lines) ||
+    (JSON.stringify(cueDraft.blocks) !==
+      JSON.stringify(selectedDocument.blocks) ||
       cueDraft.start !== formatTimestamp(baseStart) ||
-      cueDraft.end !== formatTimestamp(baseEnd) ||
-      cueDraft.position !== basePosition)
+      cueDraft.end !== formatTimestamp(baseEnd))
   )
 
   const updateCueDraft = (patch: Partial<CueEditDraft>) => {
@@ -749,6 +753,25 @@ export function ProjectWorkspace({
       ...current,
       [activeCueId]: { ...cueDraft, ...patch },
     }))
+  }
+
+  const updateCueBlock = (index: number, patch: Partial<TextBlock>) => {
+    if (!cueDraft) return
+    updateCueDraft({
+      blocks: cueDraft.blocks.map((block, blockIndex) =>
+        blockIndex === index ? { ...block, ...patch } : block
+      ),
+    })
+  }
+
+  const moveCueBlock = (index: number, offset: number) => {
+    if (!cueDraft) return
+    const target = index + offset
+    if (target < 0 || target >= cueDraft.blocks.length) return
+    const blocks = [...cueDraft.blocks]
+    const [moved] = blocks.splice(index, 1)
+    blocks.splice(target, 0, moved)
+    updateCueDraft({ blocks })
   }
 
   const cueText = React.useMemo(() => {
@@ -811,10 +834,12 @@ export function ProjectWorkspace({
         document: {
           start_ms: startMs,
           end_ms: endMs,
-          position: cueDraft.position,
           subtitle: {
             ...selectedDocument,
-            lines: normalizeOcrLines(cueDraft.lines),
+            blocks: cueDraft.blocks.map((block) => ({
+              ...block,
+              lines: normalizeOcrLines(block.lines),
+            })),
           },
         },
       })
@@ -1371,7 +1396,7 @@ export function ProjectWorkspace({
                         projectPath={project.path}
                         cue={selectedCue}
                         document={previewDocument}
-                        position={cueDraft?.position ?? selectedCue.position}
+                        sourceDocument={selectedDocument}
                       />
                     ) : (
                       <Empty className="h-full border-0">
@@ -1407,6 +1432,8 @@ export function ProjectWorkspace({
                   changed={draftChanged}
                   saving={saving}
                   onDraftChange={updateCueDraft}
+                  onBlockChange={updateCueBlock}
+                  onBlockMove={moveCueBlock}
                   onSave={() => void saveCue()}
                   ocrBusy={ocrState !== "idle"}
                   translationBusy={translationBusy}
@@ -1577,22 +1604,20 @@ function CueComparison({
   projectPath,
   cue,
   document,
-  position,
+  sourceDocument,
 }: {
   projectPath: string
   cue: SubtitleCue
+  /** The draft being edited. */
   document: OcrDocument | null
-  position: SubtitlePosition
+  /** The saved document, used only to tell which blocks have been moved. */
+  sourceDocument: OcrDocument | null
 }) {
   const [imageUrl, setImageUrl] = React.useState<string | null>(null)
   const [imageError, setImageError] = React.useState<string | null>(null)
   const imagePlacement = cueImagePlacement(cue.geometry)
-  const subtitlePlacement = cueSubtitlePlacement(
-    cue.geometry,
-    cue.position,
-    position,
-    document?.lines.length ?? 1
-  )
+  const canvasWidth = Math.max(1, cue.geometry.canvas_width)
+  const canvasHeight = Math.max(1, cue.geometry.canvas_height)
 
   React.useEffect(() => {
     let active = true
@@ -1652,6 +1677,23 @@ function CueComparison({
                 height={imagePlacement.height}
                 preserveAspectRatio="none"
               />
+              {/* Only worth drawing once the analyzer actually split the cue:
+                  a single box around the whole bitmap says nothing. */}
+              {(sourceDocument?.blocks.length ?? 0) > 1 &&
+                sourceDocument?.blocks.map((block, blockIndex) => (
+                  <rect
+                    key={blockIndex}
+                    x={block.bounds.x}
+                    y={block.bounds.y}
+                    width={block.bounds.width}
+                    height={block.bounds.height}
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth={Math.max(1, canvasHeight / 400)}
+                    strokeDasharray={`${Math.max(4, canvasHeight / 120)}`}
+                    className="text-preview-muted"
+                  />
+                ))}
             </svg>
           ) : imageError ? (
             <p className="text-xs text-preview-muted">
@@ -1669,32 +1711,62 @@ function CueComparison({
         <div className="flex min-h-0 flex-1 items-center justify-center bg-preview p-5">
           <svg
             className="h-full w-full"
-            viewBox={`0 0 ${subtitlePlacement.canvasWidth} ${subtitlePlacement.canvasHeight}`}
+            viewBox={`0 0 ${canvasWidth} ${canvasHeight}`}
             preserveAspectRatio="xMidYMid meet"
             role="img"
             aria-label={m.workspace_preview_aria({ index: cue.cue_index })}
           >
-            <foreignObject
-              x={subtitlePlacement.x}
-              y={subtitlePlacement.y}
-              width={subtitlePlacement.width}
-              height={subtitlePlacement.height}
-              overflow="visible"
-            >
-              <div
-                className="flex h-full w-full flex-col justify-center"
-                style={{
-                  alignItems: subtitlePlacement.alignItems,
-                  textAlign: subtitlePlacement.textAlign,
-                }}
+            {document?.blocks.length ? (
+              document.blocks.map((block, blockIndex) => {
+                const placement = blockSubtitlePlacement(
+                  cue.geometry,
+                  block,
+                  block.position !==
+                    sourceDocument?.blocks[blockIndex]?.position,
+                  block.lines.length
+                )
+                return (
+                  <foreignObject
+                    key={blockIndex}
+                    x={placement.x}
+                    y={placement.y}
+                    width={placement.width}
+                    height={placement.height}
+                    overflow="visible"
+                  >
+                    <div
+                      className="flex h-full w-full flex-col justify-center"
+                      style={{
+                        alignItems: placement.alignItems,
+                        textAlign: placement.textAlign,
+                      }}
+                    >
+                      <RenderedBlock
+                        block={block}
+                        fontSize={placement.fontSize}
+                        lineHeight={placement.lineHeight}
+                      />
+                    </div>
+                  </foreignObject>
+                )
+              })
+            ) : (
+              <foreignObject
+                x={0}
+                y={0}
+                width={canvasWidth}
+                height={canvasHeight}
+                overflow="visible"
               >
-                <RenderedSubtitle
-                  document={document}
-                  fontSize={subtitlePlacement.fontSize}
-                  lineHeight={subtitlePlacement.lineHeight}
-                />
-              </div>
-            </foreignObject>
+                <div className="flex h-full w-full items-center justify-center">
+                  <RenderedSubtitle
+                    document={null}
+                    fontSize={Math.max(12, canvasHeight * 0.03)}
+                    lineHeight={Math.max(12, canvasHeight * 0.04)}
+                  />
+                </div>
+              </foreignObject>
+            )}
           </svg>
         </div>
       </div>
@@ -1774,6 +1846,8 @@ function Inspector({
   changed,
   saving,
   onDraftChange,
+  onBlockChange,
+  onBlockMove,
   onSave,
   ocrBusy,
   translationBusy,
@@ -1796,6 +1870,8 @@ function Inspector({
   changed: boolean
   saving: boolean
   onDraftChange: (patch: Partial<CueEditDraft>) => void
+  onBlockChange: (index: number, patch: Partial<TextBlock>) => void
+  onBlockMove: (index: number, offset: number) => void
   onSave: () => void
   ocrBusy: boolean
   translationBusy: boolean
@@ -1814,6 +1890,22 @@ function Inspector({
 }) {
   const headerRef = React.useRef<HTMLDivElement>(null)
   const contentRef = React.useRef<HTMLDivElement>(null)
+  const blocks = draft?.blocks ?? []
+  // Blocks belong to one cue, so the selection is stored with the cue it was
+  // made in: moving to another cue, or re-recognizing this one into a different
+  // number of blocks, falls back to the first block without an effect to reset it.
+  const [selectedBlock, setSelectedBlock] = React.useState<{
+    cueId: string
+    index: number
+  } | null>(null)
+  const clampedBlockIndex =
+    selectedBlock && selectedBlock.cueId === cue?.id
+      ? Math.min(selectedBlock.index, Math.max(0, blocks.length - 1))
+      : 0
+  const activeBlock = blocks[clampedBlockIndex]
+  const selectBlock = (index: number) => {
+    if (cue) setSelectedBlock({ cueId: cue.id, index })
+  }
 
   React.useLayoutEffect(() => {
     const header = headerRef.current
@@ -1947,10 +2039,69 @@ function Inspector({
                         {revisionCount}
                       </Badge>
                     </div>
+                    {blocks.length > 1 && (
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <div
+                          className="flex flex-wrap gap-1.5"
+                          role="tablist"
+                          aria-label={m.workspace_blocks()}
+                        >
+                          {blocks.map((block, index) => (
+                            <Button
+                              key={index}
+                              type="button"
+                              size="sm"
+                              role="tab"
+                              aria-selected={index === clampedBlockIndex}
+                              variant={
+                                index === clampedBlockIndex
+                                  ? "secondary"
+                                  : "ghost"
+                              }
+                              onClick={() => selectBlock(index)}
+                            >
+                              {m.workspace_block({ index: index + 1 })}
+                              <span className="text-muted-foreground">
+                                {writingModeLabel(block.writing_mode)}
+                              </span>
+                            </Button>
+                          ))}
+                        </div>
+                        {/* Reading order is guessed from geometry, so a wrong
+                            guess has to be fixable. */}
+                        <div className="ml-auto flex items-center gap-1">
+                          <IconButton
+                            label={m.workspace_block_move_earlier()}
+                            icon={ChevronLeftIcon}
+                            size="icon-xs"
+                            disabled={saving || clampedBlockIndex === 0}
+                            onClick={() => {
+                              onBlockMove(clampedBlockIndex, -1)
+                              selectBlock(clampedBlockIndex - 1)
+                            }}
+                          />
+                          <IconButton
+                            label={m.workspace_block_move_later()}
+                            icon={ChevronRightIcon}
+                            size="icon-xs"
+                            disabled={
+                              saving || clampedBlockIndex === blocks.length - 1
+                            }
+                            onClick={() => {
+                              onBlockMove(clampedBlockIndex, 1)
+                              selectBlock(clampedBlockIndex + 1)
+                            }}
+                          />
+                        </div>
+                      </div>
+                    )}
                     <SubtitleContentEditor
-                      lines={draft?.lines ?? []}
+                      key={`${cue.id}-${clampedBlockIndex}`}
+                      lines={activeBlock?.lines ?? []}
                       disabled={!document || saving}
-                      onChange={(lines) => onDraftChange({ lines })}
+                      onChange={(lines) =>
+                        onBlockChange(clampedBlockIndex, { lines })
+                      }
                     />
                     <Button onClick={onSave} disabled={!changed || saving}>
                       {saving ? (
@@ -2001,10 +2152,43 @@ function Inspector({
                 <Field>
                   <FieldLabel>{m.workspace_position()}</FieldLabel>
                   <PositionGrid
-                    value={draft?.position ?? cue.position}
-                    disabled={!document || saving}
-                    onValueChange={(position) => onDraftChange({ position })}
+                    value={activeBlock?.position ?? cue.position}
+                    disabled={!document || saving || !activeBlock}
+                    onValueChange={(position) =>
+                      onBlockChange(clampedBlockIndex, { position })
+                    }
                   />
+                </Field>
+                <Field>
+                  <FieldLabel>{m.workspace_writing_mode()}</FieldLabel>
+                  <div
+                    className="flex gap-1.5"
+                    role="radiogroup"
+                    aria-label={m.workspace_writing_mode()}
+                  >
+                    {writingModes.map((mode) => (
+                      <Button
+                        key={mode}
+                        type="button"
+                        size="sm"
+                        role="radio"
+                        aria-checked={activeBlock?.writing_mode === mode}
+                        variant={
+                          activeBlock?.writing_mode === mode
+                            ? "secondary"
+                            : "outline"
+                        }
+                        disabled={!document || saving || !activeBlock}
+                        onClick={() =>
+                          onBlockChange(clampedBlockIndex, {
+                            writing_mode: mode,
+                          })
+                        }
+                      >
+                        {writingModeLabel(mode)}
+                      </Button>
+                    ))}
+                  </div>
                 </Field>
               </section>
             </div>

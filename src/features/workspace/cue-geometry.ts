@@ -1,4 +1,4 @@
-import type { SubtitleCue, SubtitlePosition } from "@/features/projects/types"
+import type { SubtitleCue, TextBlock } from "@/features/projects/types"
 
 type CueGeometry = SubtitleCue["geometry"]
 
@@ -11,8 +11,9 @@ export type CueImagePlacement = {
   height: number
 }
 
-export type CueSubtitlePlacement = CueImagePlacement & {
+export type BlockPlacement = CueImagePlacement & {
   fontSize: number
+  /** Line spacing in horizontal writing, column spacing in vertical writing. */
   lineHeight: number
   alignItems: "flex-start" | "center" | "flex-end"
   textAlign: "left" | "center" | "right"
@@ -38,39 +39,50 @@ export function cueImagePlacement(geometry: CueGeometry): CueImagePlacement {
   }
 }
 
-export function cueSubtitlePlacement(
+/**
+ * Places one text block on the preview canvas.
+ *
+ * While the block sits where it was recognized, its own bounds are the truth
+ * and are used as-is. Once someone moves it to a different cell of the 3×3
+ * grid there is no measured rectangle to fall back on, so the same-sized box is
+ * placed against the canvas margins instead — which is why the caller passes
+ * whether the position was edited rather than the placement re-deriving it.
+ */
+export function blockSubtitlePlacement(
   geometry: CueGeometry,
-  sourcePosition: SubtitlePosition,
-  draftPosition: SubtitlePosition,
-  lineCount: number
-): CueSubtitlePlacement {
+  block: TextBlock,
+  moved: boolean,
+  unitCount: number
+): BlockPlacement {
   const canvasWidth = Math.max(1, geometry.canvas_width)
   const canvasHeight = Math.max(1, geometry.canvas_height)
-  const width = Math.max(1, geometry.width)
-  const height = Math.max(1, geometry.height)
-  const unchanged = sourcePosition === draftPosition
-  const [vertical, horizontal] = draftPosition.split("-") as [
+  const width = Math.max(1, block.bounds.width)
+  const height = Math.max(1, block.bounds.height)
+  const [vertical, horizontal] = block.position.split("-") as [
     "top" | "middle" | "bottom",
     "left" | "center" | "right",
   ]
   const horizontalMargin = Math.max(32, canvasWidth * 0.035)
   const verticalMargin = Math.max(24, canvasHeight * 0.04)
-  const x = unchanged
-    ? geometry.x
+  const x = !moved
+    ? block.bounds.x
     : horizontal === "left"
       ? horizontalMargin
       : horizontal === "right"
         ? canvasWidth - horizontalMargin - width
         : (canvasWidth - width) / 2
-  const y = unchanged
-    ? geometry.y
+  const y = !moved
+    ? block.bounds.y
     : vertical === "top"
       ? verticalMargin
       : vertical === "bottom"
         ? canvasHeight - verticalMargin - height
         : (canvasHeight - height) / 2
-  const rows = Math.max(1, lineCount)
-  const lineHeight = height / rows
+  const units = Math.max(1, unitCount)
+  // Units stack across the flow: rows down the block's height in horizontal
+  // writing, columns across its width in vertical writing.
+  const lineHeight =
+    block.writing_mode === "vertical_rl" ? width / units : height / units
 
   return {
     canvasWidth,

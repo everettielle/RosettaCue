@@ -2,20 +2,25 @@ use std::time::Instant;
 
 use rosettacue_diagnostics::{DiagnosticEvent, DiagnosticLevel};
 use rosettacue_domain::{
-    CueEditDocument, OcrDocument, OcrLine, OcrSpan, ProperNounMapping, TextStyle,
+    CueEditDocument, OcrDocument, OcrLine, OcrSpan, ProperNounMapping, TextBlock, TextStyle,
 };
 use rosettacue_llm::{CompletionRequest, ProviderClient, ProviderConfig};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-pub const TRANSLATION_PROMPT_VERSION: &str = "subtitle-translation-v2";
+pub const TRANSLATION_PROMPT_VERSION: &str = "subtitle-translation-v3";
 
 const SYSTEM_PROMPT: &str = r"You are a professional audiovisual subtitle translator.
 Translate only the supplied subtitle lines into the requested target language.
 Preserve meaning, tone, speaker intent, punctuation, and deliberate ellipses.
 Use surrounding cues only as context; never include their translations in the output.
 When proper_noun_mappings are supplied, use each mapped translation exactly whenever its source proper noun occurs. Do not translate, inflect, or annotate the mapped form differently.
-Return exactly one output item for every input line, with the same 1-based line_index.
+A cue may arrive as several blocks. Blocks are separate regions of the same
+image and often separate voices: read all of them for context, but keep each
+translation inside the block its source came from and never move text between
+blocks to make a sentence read better.
+Return exactly one output item for every input line, in the same block_index and
+line_index it arrived under.
 Do not add commentary, notes, Markdown, speaker labels, or explanations.";
 
 #[derive(Debug, Clone)]
@@ -37,6 +42,12 @@ pub struct TranslationOutput {
 
 #[derive(Debug, Deserialize)]
 struct TranslationResponse {
+    blocks: Vec<TranslatedBlock>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TranslatedBlock {
+    block_index: u32,
     lines: Vec<TranslatedLine>,
 }
 
@@ -45,6 +56,13 @@ struct TranslatedLine {
     line_index: u32,
     text: String,
 }
+
+/// How many lines each block of a cue holds, in reading order.
+///
+/// Block boundaries are the one thing a translation must not rearrange, and a
+/// prompt asking politely is not a guarantee. Sending the shape and requiring
+/// the response to match it exactly makes the boundary a validation rule.
+type CueShape = Vec<usize>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum TranslationError {
@@ -89,7 +107,8 @@ impl SubtitleTranslator {
         if request.target_language.trim().is_empty() {
             return Err(TranslationError::MissingTargetLanguage);
         }
-        if request.document.subtitle.lines.is_empty() {
+        let shape = cue_shape(request.document);
+        if shape.iter().sum::<usize>() == 0 {
             return Err(TranslationError::EmptySource);
         }
         let started = Instant::now();
@@ -112,7 +131,7 @@ impl SubtitleTranslator {
                         "model": self.client.config().model,
                         "source_language": request.source_language,
                         "target_language": request.target_language,
-                        "line_count": request.document.subtitle.lines.len(),
+                        "line_count": request.document.subtitle.line_count(),
                         "proper_noun_count": request.proper_nouns.len()
                     })
                 },
@@ -126,11 +145,11 @@ impl SubtitleTranslator {
                 previous_response: previous_response.as_deref(),
                 correction: correction.as_deref(),
             })?;
-            match validate_response(&response.content, request.document.subtitle.lines.len()) {
-                Ok(lines) => {
+            match validate_response(&response.content, &shape) {
+                Ok(blocks) => {
                     let document = translated_document(
                         request.document,
-                        lines,
+                        blocks,
                         self.client.config(),
                         request.target_language,
                     );
@@ -146,7 +165,7 @@ impl SubtitleTranslator {
                             serde_json::json!({
                                 "attempt": attempt,
                                 "candidate_content": response.content,
-                                "line_count": document.subtitle.lines.len()
+                                "line_count": document.subtitle.line_count()
                             })
                         },
                     );
@@ -240,19 +259,39 @@ fn translation_context(request: &TranslationRequest<'_>) -> String {
     .to_string()
 }
 
+fn cue_shape(document: &CueEditDocument) -> CueShape {
+    document
+        .subtitle
+        .blocks
+        .iter()
+        .map(|block| block.lines.len())
+        .collect()
+}
+
 fn translation_prompt(request: &TranslationRequest<'_>) -> String {
-    let lines = request
+    let blocks = request
         .document
         .subtitle
-        .lines
+        .blocks
         .iter()
         .enumerate()
-        .map(|(index, line)| json!({ "line_index": index + 1, "text": line.text }))
+        .map(|(block_index, block)| {
+            json!({
+                "block_index": block_index + 1,
+                "writing_mode": block.writing_mode.as_str(),
+                "lines": block
+                    .lines
+                    .iter()
+                    .enumerate()
+                    .map(|(index, line)| json!({ "line_index": index + 1, "text": line.text }))
+                    .collect::<Vec<_>>(),
+            })
+        })
         .collect::<Vec<_>>();
     json!({
         "previous_cue_context": request.previous_context,
         "next_cue_context": request.next_context,
-        "lines": lines
+        "blocks": blocks
     })
     .to_string()
 }
@@ -266,38 +305,90 @@ fn translation_schema() -> Value {
             "schema": {
                 "type": "object",
                 "properties": {
-                    "lines": {
+                    "blocks": {
                         "type": "array",
                         "minItems": 1,
                         "items": {
                             "type": "object",
                             "properties": {
-                                "line_index": { "type": "integer", "minimum": 1 },
-                                "text": { "type": "string", "minLength": 1 }
+                                "block_index": { "type": "integer", "minimum": 1 },
+                                "lines": {
+                                    "type": "array",
+                                    "minItems": 1,
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "line_index": { "type": "integer", "minimum": 1 },
+                                            "text": { "type": "string", "minLength": 1 }
+                                        },
+                                        "required": ["line_index", "text"],
+                                        "additionalProperties": false
+                                    }
+                                }
                             },
-                            "required": ["line_index", "text"],
+                            "required": ["block_index", "lines"],
                             "additionalProperties": false
                         }
                     }
                 },
-                "required": ["lines"],
+                "required": ["blocks"],
                 "additionalProperties": false
             }
         }
     })
 }
 
-fn validate_response(content: &str, line_count: usize) -> Result<Vec<String>, TranslationError> {
+fn validate_response(
+    content: &str,
+    shape: &CueShape,
+) -> Result<Vec<Vec<String>>, TranslationError> {
     let parsed = parse_json_content(content)?;
     let response = serde_json::from_value::<TranslationResponse>(parsed)?;
-    if response.lines.len() != line_count {
+    if response.blocks.len() != shape.len() {
+        return Err(TranslationError::Validation(format!(
+            "expected {} blocks, received {}",
+            shape.len(),
+            response.blocks.len()
+        )));
+    }
+    let mut translated: Vec<Option<Vec<String>>> = vec![None; shape.len()];
+    for block in response.blocks {
+        let index = usize::try_from(block.block_index)
+            .ok()
+            .and_then(|value| value.checked_sub(1))
+            .filter(|index| *index < shape.len())
+            .ok_or_else(|| {
+                TranslationError::Validation("block index is out of range".to_owned())
+            })?;
+        let lines = validate_block(block.lines, shape[index])?;
+        if translated[index].replace(lines).is_some() {
+            return Err(TranslationError::Validation(
+                "block mapping is duplicated".to_owned(),
+            ));
+        }
+    }
+    translated
+        .into_iter()
+        .map(|block| {
+            block.ok_or_else(|| {
+                TranslationError::Validation("block mapping is incomplete".to_owned())
+            })
+        })
+        .collect()
+}
+
+fn validate_block(
+    lines: Vec<TranslatedLine>,
+    line_count: usize,
+) -> Result<Vec<String>, TranslationError> {
+    if lines.len() != line_count {
         return Err(TranslationError::Validation(format!(
             "expected {line_count} lines, received {}",
-            response.lines.len()
+            lines.len()
         )));
     }
     let mut ordered = vec![None; line_count];
-    for line in response.lines {
+    for line in lines {
         let index = usize::try_from(line.line_index)
             .ok()
             .and_then(|value| value.checked_sub(1))
@@ -338,41 +429,57 @@ fn parse_json_content(content: &str) -> Result<Value, TranslationError> {
 
 fn translated_document(
     source: &CueEditDocument,
-    lines: Vec<String>,
+    translated: Vec<Vec<String>>,
     config: &ProviderConfig,
     target_language: &str,
 ) -> CueEditDocument {
-    let translated_lines = source
+    // Placement, direction, and provenance are facts about the source bitmap,
+    // so translation carries them through untouched and replaces only text.
+    // Writing mode included: that Korean is rarely set vertically is a
+    // rendering and export decision, not a change to what the cue said.
+    let blocks = source
         .subtitle
-        .lines
+        .blocks
         .iter()
-        .zip(lines)
-        .map(|(source_line, text)| {
-            let styles = uniform_line_styles(source_line);
-            let color = uniform_line_color(source_line);
-            OcrLine {
-                spans: vec![OcrSpan::Text {
-                    text: text.clone(),
-                    styles,
-                    color,
-                }],
-                text,
-            }
+        .zip(translated)
+        .map(|(block, lines)| TextBlock {
+            bounds: block.bounds,
+            writing_mode: block.writing_mode,
+            position: block.position,
+            source: block.source,
+            lines: block
+                .lines
+                .iter()
+                .zip(lines)
+                .map(|(source_line, text)| translated_line(source_line, text))
+                .collect(),
         })
         .collect();
     CueEditDocument {
         start_ms: source.start_ms,
         end_ms: source.end_ms,
-        position: source.position,
         subtitle: OcrDocument {
             prompt_version: TRANSLATION_PROMPT_VERSION.to_owned(),
             provider: config.provider.as_str().to_owned(),
             model: config.model.clone(),
             language: target_language.to_owned(),
             unreadable: false,
-            lines: translated_lines,
+            blocks,
             normalizations: Vec::new(),
         },
+    }
+}
+
+fn translated_line(source: &OcrLine, text: String) -> OcrLine {
+    let styles = uniform_line_styles(source);
+    let color = uniform_line_color(source);
+    OcrLine {
+        spans: vec![OcrSpan::Text {
+            text: text.clone(),
+            styles,
+            color,
+        }],
+        text,
     }
 }
 
@@ -398,29 +505,47 @@ fn uniform_line_color(line: &OcrLine) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use rosettacue_domain::{SubtitlePosition, TextStyle};
+    use rosettacue_domain::{BlockBounds, BlockSource, SubtitlePosition, TextStyle, WritingMode};
 
     use super::*;
+
+    fn block(writing_mode: WritingMode, lines: Vec<OcrLine>) -> TextBlock {
+        TextBlock {
+            bounds: BlockBounds {
+                x: 20,
+                y: 900,
+                width: 400,
+                height: 60,
+            },
+            writing_mode,
+            position: SubtitlePosition::BottomCenter,
+            source: BlockSource::Detected,
+            lines,
+        }
+    }
+
+    fn line(text: &str) -> OcrLine {
+        OcrLine {
+            text: text.to_owned(),
+            spans: vec![OcrSpan::Text {
+                text: text.to_owned(),
+                styles: vec![TextStyle::Italic],
+                color: Some("#FFFF00".to_owned()),
+            }],
+        }
+    }
 
     fn source() -> CueEditDocument {
         CueEditDocument {
             start_ms: 100,
             end_ms: 900,
-            position: SubtitlePosition::BottomCenter,
             subtitle: OcrDocument {
                 prompt_version: "ocr".to_owned(),
                 provider: "lmstudio".to_owned(),
                 model: "vision".to_owned(),
                 language: "jpn".to_owned(),
                 unreadable: false,
-                lines: vec![OcrLine {
-                    text: "物語は続く。".to_owned(),
-                    spans: vec![OcrSpan::Text {
-                        text: "物語は続く。".to_owned(),
-                        styles: vec![TextStyle::Italic],
-                        color: Some("#FFFF00".to_owned()),
-                    }],
-                }],
+                blocks: vec![block(WritingMode::HorizontalTb, vec![line("物語は続く。")])],
                 normalizations: Vec::new(),
             },
         }
@@ -429,8 +554,8 @@ mod tests {
     #[test]
     fn validates_line_mapping_and_preserves_layout_style() {
         let lines = validate_response(
-            r#"{"lines":[{"line_index":1,"text":"The story continues."}]}"#,
-            1,
+            r#"{"blocks":[{"block_index":1,"lines":[{"line_index":1,"text":"The story continues."}]}]}"#,
+            &vec![1],
         )
         .expect("translation response");
         let config = ProviderConfig {
@@ -440,26 +565,86 @@ mod tests {
         let translated = translated_document(&source(), lines, &config, "eng");
         assert_eq!(translated.start_ms, 100);
         assert_eq!(translated.subtitle.language, "eng");
+        let first = translated
+            .subtitle
+            .lines()
+            .next()
+            .expect("a translated line");
+        assert_eq!(first.spans[0].styles(), &[TextStyle::Italic]);
+        assert_eq!(first.spans[0].color(), Some("#FFFF00"));
+        assert_eq!(first.text, "The story continues.");
+    }
+
+    #[test]
+    fn keeps_every_block_boundary_placement_and_direction() {
+        let mut document = source();
+        document.subtitle.blocks = vec![
+            block(WritingMode::VerticalRl, vec![line("冷たい！")]),
+            block(
+                WritingMode::HorizontalTb,
+                vec![line("ながく"), line("おもいけるかな")],
+            ),
+        ];
+        let lines = validate_response(
+            r#"{"blocks":[{"block_index":1,"lines":[{"line_index":1,"text":"Cold!"}]},{"block_index":2,"lines":[{"line_index":1,"text":"Long"},{"line_index":2,"text":"I wished"}]}]}"#,
+            &vec![1, 2],
+        )
+        .expect("translation response");
+
+        let translated = translated_document(&document, lines, &ProviderConfig::default(), "eng");
+
+        assert_eq!(translated.subtitle.blocks.len(), 2);
         assert_eq!(
-            translated.subtitle.lines[0].spans[0].styles(),
-            &[TextStyle::Italic]
+            translated.subtitle.blocks[0].writing_mode,
+            WritingMode::VerticalRl,
+            "writing mode is a fact about the source bitmap, not the text"
         );
-        assert_eq!(
-            translated.subtitle.lines[0].spans[0].color(),
-            Some("#FFFF00")
-        );
-        assert_eq!(translated.subtitle.lines[0].text, "The story continues.");
+        assert_eq!(translated.subtitle.blocks[0].lines.len(), 1);
+        assert_eq!(translated.subtitle.blocks[1].lines.len(), 2);
+        assert_eq!(translated.subtitle.blocks[1].lines[1].text, "I wished");
     }
 
     #[test]
     fn rejects_missing_or_duplicate_lines() {
-        assert!(validate_response(r#"{"lines":[]}"#, 1).is_err());
+        assert!(validate_response(r#"{"blocks":[]}"#, &vec![1]).is_err());
         assert!(
             validate_response(
-                r#"{"lines":[{"line_index":1,"text":"A"},{"line_index":1,"text":"B"}]}"#,
-                2,
+                r#"{"blocks":[{"block_index":1,"lines":[{"line_index":1,"text":"A"},{"line_index":1,"text":"B"}]}]}"#,
+                &vec![2],
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn a_response_that_reshapes_the_cue_is_rejected() {
+        // The block boundary is the thing a model is most likely to smooth over,
+        // so the schema shape is checked rather than trusted.
+        let two_blocks = vec![1, 2];
+
+        assert!(
+            validate_response(
+                r#"{"blocks":[{"block_index":1,"lines":[{"line_index":1,"text":"Cold! Long"},{"line_index":2,"text":"I wished"}]}]}"#,
+                &two_blocks,
+            )
+            .is_err(),
+            "merging two blocks into one must fail"
+        );
+        assert!(
+            validate_response(
+                r#"{"blocks":[{"block_index":1,"lines":[{"line_index":1,"text":"Cold!"}]},{"block_index":2,"lines":[{"line_index":1,"text":"Long I wished"}]}]}"#,
+                &two_blocks,
+            )
+            .is_err(),
+            "collapsing two lines of a block into one must fail"
+        );
+        assert!(
+            validate_response(
+                r#"{"blocks":[{"block_index":1,"lines":[{"line_index":1,"text":"Cold!"}]},{"block_index":1,"lines":[{"line_index":1,"text":"Long"},{"line_index":2,"text":"I wished"}]}]}"#,
+                &two_blocks,
+            )
+            .is_err(),
+            "two responses for the same block must fail"
         );
     }
 
@@ -520,6 +705,8 @@ mod tests {
 
         let prompt: Value = serde_json::from_str(&translation_prompt(&first)).expect("prompt");
         assert_eq!(prompt["next_cue_context"], "次の台詞");
-        assert!(prompt["lines"].is_array());
+        assert!(prompt["blocks"].is_array());
+        assert_eq!(prompt["blocks"][0]["block_index"], 1);
+        assert_eq!(prompt["blocks"][0]["writing_mode"], "horizontal_tb");
     }
 }

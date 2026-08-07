@@ -2,7 +2,6 @@ mod error;
 mod languages;
 mod lmstudio;
 mod prompt;
-mod row_detection;
 
 use std::path::PathBuf;
 
@@ -12,10 +11,26 @@ pub use lmstudio::{
     diagnose_provider, list_lmstudio_models, list_provider_models,
 };
 pub use prompt::PROMPT_VERSION;
-use rosettacue_domain::OcrDocument;
+use rosettacue_domain::{CueGeometry, OcrDocument, ValidationIssue};
+pub use rosettacue_layout::{CueLayout, LayoutOptions};
 pub use rosettacue_llm::{
     LlmProvider, ProviderConfig, ProviderDiagnostic, ProviderSpec, ReasoningEffort,
 };
+
+/// The layout options a language implies.
+///
+/// Reading order is language policy, so it is resolved from the same preset
+/// table the prompts come from rather than being chosen at each call site.
+///
+/// # Errors
+///
+/// Returns an error when the language has no preset.
+pub fn layout_options(language: &str) -> Result<LayoutOptions, OcrError> {
+    Ok(LayoutOptions {
+        block_order: languages::resolve(language)?.block_order,
+        ..LayoutOptions::default()
+    })
+}
 
 #[derive(Debug, Clone)]
 pub struct OcrRequest {
@@ -24,11 +39,16 @@ pub struct OcrRequest {
     pub image_path: PathBuf,
     pub image_sha256: String,
     pub language: String,
+    /// Needed to place recognized blocks on the canvas, and to size the crops.
+    pub geometry: CueGeometry,
 }
 
 #[derive(Debug, Clone)]
 pub struct OcrRecognition {
     pub document: OcrDocument,
+    /// Soft checks that did not pass. Never a reason to reject the result; the
+    /// warnings among them are a reason to put the cue in front of a person.
+    pub issues: Vec<ValidationIssue>,
     pub raw_response: String,
     pub elapsed_ms: u64,
 }

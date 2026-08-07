@@ -5,8 +5,10 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use rosettacue_diagnostics::{DiagnosticEvent, DiagnosticLevel};
 use rosettacue_domain::{
-    NormalizationRecord, OcrDocument, OcrLine, OcrSpan, RubyAnnotation, RubyPosition, TextStyle,
+    BlockSource, NormalizationRecord, OcrDocument, OcrLine, OcrSpan, RubyAnnotation, RubyPosition,
+    TextBlock, TextStyle, ValidationIssue, ValidationSeverity, WritingMode,
 };
+use rosettacue_layout::{BlockLayout, CueLayout};
 use rosettacue_llm::{
     CompletionRequest, CompletionResponse, LlmModel, LlmProvider, ProviderClient, ProviderConfig,
     ProviderDiagnostic,
@@ -15,8 +17,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::languages::{self, LanguagePreset, NormalizationEvent};
-use crate::prompt::{self, PROMPT_VERSION, SYSTEM_PROMPT, StagePrompt};
-use crate::row_detection::estimate_main_rows;
+use crate::prompt::{self, BlockPrompt, PROMPT_VERSION, SYSTEM_PROMPT, StagePrompt};
 use crate::{OcrBackend, OcrError, OcrRecognition, OcrRequest};
 
 pub type LmStudioConfig = ProviderConfig;
@@ -108,6 +109,8 @@ struct ValidatedAnnotation {
 
 #[derive(Debug, Deserialize)]
 struct StyleResponse {
+    /// Absent for vertical blocks, which are never asked.
+    #[serde(default)]
     italic: bool,
     color: String,
 }
@@ -248,29 +251,31 @@ impl ProviderOcrBackend {
     fn recognize_characters(
         &self,
         image_base64: &str,
-        expected_main_rows: Option<usize>,
+        block: &BlockPrompt,
         language: &LanguagePreset,
         request: &OcrRequest,
     ) -> Result<CharacterStageResult, OcrError> {
+        let writing_mode = block.writing_mode;
+        let expected_units = block.expected_units;
         if let Some(ruby_client) = &self.ruby_client {
             let (main_text, main_text_response, _) = Self::run_stage(
                 &self.recognition_client,
                 image_base64,
                 "main_text_recognition",
-                &prompt::main_text_recognition(language, expected_main_rows),
+                &prompt::main_text_recognition(language, block),
                 &main_text_schema(),
                 request,
-                |content| validate_main_text(content, expected_main_rows, language),
+                |content| validate_main_text(content, expected_units, language),
             )?;
             let normalized_main_lines = normalized_main_lines(&main_text.lines, language)?;
             let (ruby, ruby_response, _) = Self::run_stage(
                 ruby_client,
                 image_base64,
                 "ruby_recognition",
-                &prompt::ruby_recognition(language, &normalized_main_lines),
-                &ruby_schema(),
+                &prompt::ruby_recognition(language, writing_mode, &normalized_main_lines),
+                &ruby_schema(writing_mode),
                 request,
-                |content| validate_ruby(content, &normalized_main_lines, language),
+                |content| validate_ruby(content, &normalized_main_lines, writing_mode, language),
             )?;
             let recognition = RecognitionResponse {
                 lines: main_text.lines,
@@ -296,10 +301,10 @@ impl ProviderOcrBackend {
                 &self.recognition_client,
                 image_base64,
                 "combined_recognition",
-                &prompt::combined_recognition(language, expected_main_rows),
-                &combined_recognition_schema(),
+                &prompt::combined_recognition(language, block),
+                &combined_recognition_schema(writing_mode),
                 request,
-                |content| validate_recognition(content, expected_main_rows, language),
+                |content| validate_recognition(content, expected_units, writing_mode, language),
             )?;
             let combined_stage = parse_json_content(&response.content)?;
             let recognition_usage = response.usage.clone();
@@ -316,64 +321,155 @@ impl ProviderOcrBackend {
         }
     }
 
+    /// Recognizes one text block: characters, then ruby, then style.
+    ///
+    /// The glyph-count check happens here rather than in `run_stage` because it
+    /// is soft. `run_stage` rejects and retries until a hard rule passes or the
+    /// attempts run out; a glyph estimate measured from ink width is not
+    /// trustworthy enough for that. One corrective pass, then the transcription
+    /// stands and the disagreement is recorded for a reviewer.
+    fn recognize_block(
+        &self,
+        image_base64: &str,
+        layout: &BlockLayout,
+        language: &LanguagePreset,
+        request: &OcrRequest,
+        block_index: u32,
+    ) -> Result<BlockOutcome, OcrError> {
+        let mut prompt = BlockPrompt {
+            writing_mode: layout.writing_mode,
+            expected_units: layout.units.and_then(|units| usize::try_from(units).ok()),
+            expected_glyphs: layout.expected_glyphs.clone(),
+            glyph_correction: None,
+        };
+        let mut issues = Vec::new();
+        let mut character = self.recognize_characters(image_base64, &prompt, language, request)?;
+        if let Some(mismatch) = glyph_mismatch(&character.recognition.lines, &prompt) {
+            prompt.glyph_correction = Some(prompt::glyph_correction(
+                prompt.writing_mode,
+                mismatch.unit,
+                mismatch.expected,
+                mismatch.actual,
+            ));
+            character = self.recognize_characters(image_base64, &prompt, language, request)?;
+            if let Some(mismatch) = glyph_mismatch(&character.recognition.lines, &prompt) {
+                issues.push(glyph_issue(block_index, prompt.writing_mode, &mismatch));
+            }
+        }
+
+        let main_lines = normalized_main_lines(&character.recognition.lines, language)?;
+        let (style, style_response, _) = Self::run_stage(
+            &self.validation_client,
+            image_base64,
+            "style_recognition",
+            &prompt::block_style(language, prompt.writing_mode, &main_lines),
+            &style_schema(prompt.writing_mode),
+            request,
+            validate_block_style,
+        )?;
+        if prompt.writing_mode.is_vertical() {
+            issues.push(ValidationIssue {
+                code: "vertical_italic_not_assessed".to_owned(),
+                severity: ValidationSeverity::Info,
+                stage: "style_recognition".to_owned(),
+                path: Some(format!("blocks[{block_index}]")),
+                message:
+                    "Italic is defined along a horizontal baseline, so it was not judged for this vertical block."
+                        .to_owned(),
+                codepoint: None,
+            });
+        }
+
+        let unreadable = character.recognition.unreadable;
+        let model = character.response.model.clone();
+        let color = recognized_color(&style.color)?;
+        let (lines, normalizations) = assemble_lines(
+            character.recognition,
+            style.italic,
+            color.as_deref(),
+            block_index,
+            prompt.writing_mode,
+            language,
+        )?;
+        let canvas = request.geometry.canvas_bounds(layout.bounds.bounds());
+        let diagnostics = json!({
+            "block_index": block_index,
+            "pipeline_mode": character.mode,
+            "writing_mode": prompt.writing_mode.as_str(),
+            "source": layout.source.as_str(),
+            "bounds": layout.bounds,
+            "expected_units": layout.units,
+            "expected_glyphs": layout.expected_glyphs,
+            "mode_rule": layout.evidence.rule,
+            "row_bands": layout.evidence.row_bands,
+            "column_bands": layout.evidence.column_bands,
+            "em": layout.em,
+            "stages": {
+                "combined_recognition": character.combined,
+                "main_text_recognition": character.main_text,
+                "ruby_recognition": character.ruby,
+                "style_recognition": parse_json_content(&style_response.content)?,
+            },
+            "usage": {
+                "recognition": character.usage,
+                "ruby": character.ruby_usage,
+                "style": style_response.usage,
+            },
+        });
+        Ok(BlockOutcome {
+            block: TextBlock {
+                bounds: canvas,
+                writing_mode: prompt.writing_mode,
+                position: canvas.position(
+                    request.geometry.canvas_width,
+                    request.geometry.canvas_height,
+                ),
+                source: layout.source,
+                lines,
+            },
+            normalizations,
+            issues,
+            unreadable,
+            model,
+            diagnostics,
+        })
+    }
+
     fn recognize_inner(&self, request: &OcrRequest) -> Result<OcrRecognition, OcrError> {
         let language = languages::resolve(&request.language)?;
         let started = Instant::now();
         let image = std::fs::read(&request.image_path)?;
-        let expected_main_rows = estimate_main_rows(&image);
-        let image_base64 = BASE64.encode(image);
-        let character =
-            self.recognize_characters(&image_base64, expected_main_rows, language, request)?;
-        let CharacterStageResult {
-            recognition,
-            response: recognition_response,
-            combined: combined_stage,
-            main_text: main_text_stage,
-            ruby: ruby_stage,
-            usage: recognition_usage,
-            ruby_usage,
-            mode: pipeline_mode,
-        } = character;
-        let main_lines = recognition
-            .lines
-            .iter()
-            .map(|line| {
-                language
-                    .normalize(&line.text)
-                    .map(|(normalized, _)| normalized)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let (style, style_response, _) = Self::run_stage(
-            &self.validation_client,
-            &image_base64,
-            "style_recognition",
-            &prompt::whole_cue_style(language, &main_lines),
-            &style_schema(),
-            request,
-            validate_whole_cue_style,
-        )?;
-        let unreadable = recognition.unreadable;
-        let color = recognized_color(&style.color)?;
-        let (lines, normalizations) =
-            assemble_lines(recognition, style.italic, color.as_deref(), language)?;
-        let model = recognition_response
-            .model
-            .clone()
-            .unwrap_or_else(|| self.config.recognition.model.clone());
+        let layout = analyze_layout(&image, language);
+
+        let mut blocks = Vec::with_capacity(layout.blocks.len());
+        let mut normalizations = Vec::new();
+        let mut issues = Vec::new();
+        let mut diagnostics = Vec::with_capacity(layout.blocks.len());
+        let mut unreadable = false;
+        let mut model = None;
+        for (offset, block_layout) in layout.blocks.iter().enumerate() {
+            let block_index = u32::try_from(offset + 1)
+                .map_err(|_| OcrError::Validation("too many text blocks".to_owned()))?;
+            let image_base64 = BASE64.encode(block_image(&image, block_layout)?);
+            let outcome =
+                self.recognize_block(&image_base64, block_layout, language, request, block_index)?;
+            unreadable |= outcome.unreadable;
+            model = model.or(outcome.model);
+            blocks.push(outcome.block);
+            normalizations.extend(outcome.normalizations);
+            issues.extend(outcome.issues);
+            diagnostics.push(outcome.diagnostics);
+        }
+
         let raw_response = serde_json::to_string(&json!({
-            "pipeline_mode": pipeline_mode,
-            "stages": {
-                "combined_recognition": combined_stage,
-                "main_text_recognition": main_text_stage,
-                "ruby_recognition": ruby_stage,
-                "style_recognition": parse_json_content(&style_response.content)?,
+            "layout": {
+                "image": layout.image,
+                "degraded": layout.is_degraded(),
+                "total_units": layout.total_units(),
+                "doubts": layout.doubts,
             },
-            "row_estimate": expected_main_rows,
-            "usage": {
-                "recognition": recognition_usage,
-                "ruby": ruby_usage,
-                "style": style_response.usage,
-            },
+            "blocks": diagnostics,
+            "issues": issues,
             "providers": {
                 "recognition": self.config.recognition.redacted(),
                 "ruby": self.config.ruby.as_ref().map(ProviderConfig::redacted),
@@ -384,15 +480,140 @@ impl ProviderOcrBackend {
             document: OcrDocument {
                 prompt_version: PROMPT_VERSION.to_owned(),
                 provider: self.config.recognition.provider.as_str().to_owned(),
-                model,
+                model: model.unwrap_or_else(|| self.config.recognition.model.clone()),
                 language: language.code.to_owned(),
                 unreadable,
-                lines,
+                blocks,
                 normalizations,
             },
+            issues,
             raw_response,
             elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
         })
+    }
+}
+
+struct BlockOutcome {
+    block: TextBlock,
+    normalizations: Vec<NormalizationRecord>,
+    issues: Vec<ValidationIssue>,
+    unreadable: bool,
+    model: Option<String>,
+    diagnostics: Value,
+}
+
+/// Analyzes the cue bitmap, falling back to one whole-cue block.
+///
+/// A PNG this pipeline cannot decode is not a reason to fail the cue: the
+/// provider may well read it. Treating an undecodable bitmap as one horizontal
+/// block sends exactly the request the pipeline sent before blocks existed.
+fn analyze_layout(image: &[u8], language: &LanguagePreset) -> CueLayout {
+    let options = rosettacue_layout::LayoutOptions {
+        block_order: language.block_order,
+        ..rosettacue_layout::LayoutOptions::default()
+    };
+    rosettacue_layout::analyze_png(image, &options).unwrap_or_else(|_| CueLayout {
+        image: rosettacue_layout::Rect {
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 0,
+        },
+        blocks: vec![BlockLayout {
+            bounds: rosettacue_layout::Rect {
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 0,
+            },
+            writing_mode: WritingMode::HorizontalTb,
+            source: BlockSource::WholeCue,
+            units: None,
+            em: 0,
+            expected_glyphs: Vec::new(),
+            evidence: rosettacue_layout::ModeEvidence {
+                row_bands: 0,
+                column_bands: 0,
+                aspect_ratio_milli: 0,
+                rule: rosettacue_layout::ModeRule::Fallback,
+            },
+        }],
+        doubts: Vec::new(),
+    })
+}
+
+/// The bytes to send for one block.
+///
+/// A block the analyzer did not separate is the whole cue, and it is sent
+/// untouched — that request is byte for byte the one the pipeline made before
+/// blocks existed, which is what keeps a wrong layout answer harmless. A
+/// separated block is cropped, which both removes the other blocks from view
+/// and spends the provider's fixed image budget on a much smaller area.
+fn block_image(image: &[u8], block: &BlockLayout) -> Result<Vec<u8>, OcrError> {
+    if block.source == BlockSource::WholeCue {
+        return Ok(image.to_vec());
+    }
+    let padding = (block.em / 4).max(2);
+    rosettacue_layout::crop_png(image, block.bounds, padding)
+        .map_err(|error| OcrError::Validation(format!("cue bitmap could not be cropped: {error}")))
+}
+
+#[derive(Debug, Clone, Copy)]
+struct GlyphMismatch {
+    /// 1-based row or column within the block.
+    unit: usize,
+    expected: u32,
+    actual: usize,
+}
+
+/// The first unit whose length disagrees with the measured estimate by more than one.
+///
+/// One character of slack absorbs the estimate's known bias: it divides ink
+/// length by an advance read off the same ink, so a long unit drifts. Anything
+/// further apart than that is worth a second look.
+fn glyph_mismatch(lines: &[TextValue], prompt: &BlockPrompt) -> Option<GlyphMismatch> {
+    if prompt.expected_glyphs.len() != lines.len() {
+        return None;
+    }
+    lines
+        .iter()
+        .zip(&prompt.expected_glyphs)
+        .enumerate()
+        .find_map(|(offset, (line, expected))| {
+            let actual = line.text.chars().count();
+            let expected = *expected;
+            (usize::try_from(expected)
+                .unwrap_or(usize::MAX)
+                .abs_diff(actual)
+                > 1)
+            .then_some(GlyphMismatch {
+                unit: offset + 1,
+                expected,
+                actual,
+            })
+        })
+}
+
+fn glyph_issue(
+    block_index: u32,
+    writing_mode: WritingMode,
+    mismatch: &GlyphMismatch,
+) -> ValidationIssue {
+    let unit = if writing_mode.is_vertical() {
+        "column"
+    } else {
+        "row"
+    };
+    ValidationIssue {
+        code: "glyph_count_mismatch".to_owned(),
+        severity: ValidationSeverity::Warning,
+        stage: "main_text_recognition".to_owned(),
+        path: Some(format!("blocks[{block_index}].lines[{}]", mismatch.unit)),
+        message: format!(
+            "Bitmap analysis measured about {} characters in {unit} {}, but {} were transcribed.",
+            mismatch.expected, mismatch.unit, mismatch.actual
+        ),
+        codepoint: None,
     }
 }
 
@@ -537,48 +758,67 @@ fn parse_json_content(content: &str) -> Result<Value, OcrError> {
 
 fn validate_recognition(
     content: &str,
-    expected_main_rows: Option<usize>,
+    expected_units: Option<usize>,
+    writing_mode: WritingMode,
     language: &LanguagePreset,
 ) -> Result<RecognitionResponse, OcrError> {
     let response = serde_json::from_value::<RecognitionResponse>(parse_json_content(content)?)?;
-    let main_lines = validate_main_lines(&response.lines, expected_main_rows, language)?;
-    validate_annotations(&response.annotations, &main_lines, language)?;
+    let main_lines = validate_main_lines(&response.lines, expected_units, writing_mode, language)?;
+    validate_annotations(&response.annotations, &main_lines, writing_mode, language)?;
     Ok(response)
 }
 
 fn validate_main_text(
     content: &str,
-    expected_main_rows: Option<usize>,
+    expected_units: Option<usize>,
     language: &LanguagePreset,
 ) -> Result<MainTextResponse, OcrError> {
     let response = serde_json::from_value::<MainTextResponse>(parse_json_content(content)?)?;
-    validate_main_lines(&response.lines, expected_main_rows, language)?;
+    validate_main_lines(
+        &response.lines,
+        expected_units,
+        WritingMode::HorizontalTb,
+        language,
+    )?;
     Ok(response)
 }
 
 fn validate_ruby(
     content: &str,
     main_lines: &[String],
+    writing_mode: WritingMode,
     language: &LanguagePreset,
 ) -> Result<RubyResponse, OcrError> {
     let response = serde_json::from_value::<RubyResponse>(parse_json_content(content)?)?;
-    validate_annotations(&response.annotations, main_lines, language)?;
+    validate_annotations(&response.annotations, main_lines, writing_mode, language)?;
     Ok(response)
 }
 
+/// The one hard structural check on a transcription: the unit count.
+///
+/// Counting rows or columns is a projection over a flat background, which is
+/// reliable enough to reject a response over. It is scoped to one block; the
+/// count that used to be taken over the whole cue is what made a vertical
+/// column look like six missing rows.
 fn validate_main_lines(
     lines: &[TextValue],
-    expected_main_rows: Option<usize>,
+    expected_units: Option<usize>,
+    writing_mode: WritingMode,
     language: &LanguagePreset,
 ) -> Result<Vec<String>, OcrError> {
     if lines.is_empty() {
         return Err(OcrError::Validation("main text has no lines".to_owned()));
     }
-    if let Some(expected) = expected_main_rows
+    let unit = if writing_mode.is_vertical() {
+        "columns"
+    } else {
+        "rows"
+    };
+    if let Some(expected) = expected_units
         && lines.len() != expected
     {
         return Err(OcrError::Validation(format!(
-            "bitmap analysis found {expected} large main-text rows, but the response returned {}",
+            "bitmap analysis found {expected} large main-text {unit} in this block, but the response returned {}",
             lines.len()
         )));
     }
@@ -607,9 +847,27 @@ fn normalized_main_lines(
         .collect()
 }
 
+/// Folds the placement the model was asked for onto the stored, direction-relative one.
+///
+/// Vertical blocks are asked about right and left because that is what is
+/// visible; horizontal blocks about over and under. Both land on the same two
+/// domain values, and this is the only place the two vocabularies meet.
+fn ruby_position(writing_mode: WritingMode, value: &str) -> Option<RubyPosition> {
+    match (writing_mode, value) {
+        (WritingMode::HorizontalTb, "over") | (WritingMode::VerticalRl, "right") => {
+            Some(RubyPosition::Over)
+        }
+        (WritingMode::HorizontalTb, "under") | (WritingMode::VerticalRl, "left") => {
+            Some(RubyPosition::Under)
+        }
+        _ => None,
+    }
+}
+
 fn validate_annotations(
     annotations: &[RawAnnotation],
     main_lines: &[String],
+    writing_mode: WritingMode,
     language: &LanguagePreset,
 ) -> Result<(), OcrError> {
     let mut ranges_by_line: HashMap<u32, Vec<(usize, usize)>> = HashMap::new();
@@ -617,7 +875,7 @@ fn validate_annotations(
         if annotation.line_index == 0
             || usize::try_from(annotation.line_index).map_or(true, |index| index > main_lines.len())
             || annotation.base_occurrence == 0
-            || !matches!(annotation.position.as_str(), "over" | "under")
+            || ruby_position(writing_mode, &annotation.position).is_none()
         {
             return Err(OcrError::Validation(
                 "annotation placement is invalid".to_owned(),
@@ -652,7 +910,7 @@ fn validate_annotations(
     Ok(())
 }
 
-fn validate_whole_cue_style(content: &str) -> Result<StyleResponse, OcrError> {
+fn validate_block_style(content: &str) -> Result<StyleResponse, OcrError> {
     let response = serde_json::from_value::<StyleResponse>(parse_json_content(content)?)?;
     recognized_color(&response.color)?;
     Ok(response)
@@ -682,6 +940,8 @@ fn assemble_lines(
     recognition: RecognitionResponse,
     italic: bool,
     color: Option<&str>,
+    block_index: u32,
+    writing_mode: WritingMode,
     language: &LanguagePreset,
 ) -> Result<(Vec<OcrLine>, Vec<NormalizationRecord>), OcrError> {
     let mut records = Vec::new();
@@ -693,6 +953,7 @@ fn assemble_lines(
             &mut records,
             text_events,
             "annotation_text",
+            block_index,
             annotation.line_index,
             Some(annotation_index + 1),
         );
@@ -700,6 +961,7 @@ fn assemble_lines(
             &mut records,
             base_events,
             "annotation_base",
+            block_index,
             annotation.line_index,
             Some(annotation_index + 1),
         );
@@ -711,11 +973,12 @@ fn assemble_lines(
                 text,
                 base,
                 base_occurrence: annotation.base_occurrence,
-                position: if annotation.position == "over" {
-                    RubyPosition::Over
-                } else {
-                    RubyPosition::Under
-                },
+                position: ruby_position(writing_mode, &annotation.position).ok_or_else(|| {
+                    OcrError::Validation(format!(
+                        "annotation placement is invalid: {}",
+                        annotation.position
+                    ))
+                })?,
             });
     }
     let mut lines = Vec::with_capacity(recognition.lines.len());
@@ -723,7 +986,7 @@ fn assemble_lines(
         let line_index = u32::try_from(line_offset + 1)
             .map_err(|_| OcrError::Validation("too many OCR lines".to_owned()))?;
         let (text, events) = language.normalize(&raw_line.text)?;
-        add_records(&mut records, events, "text", line_index, None);
+        add_records(&mut records, events, "text", block_index, line_index, None);
         let spans = assemble_spans(
             &text,
             by_line.remove(&line_index).unwrap_or_default(),
@@ -814,12 +1077,14 @@ fn add_records(
     records: &mut Vec<NormalizationRecord>,
     events: Vec<NormalizationEvent>,
     field: &str,
+    block_index: u32,
     line_index: u32,
     annotation_index: Option<usize>,
 ) {
     records.extend(events.into_iter().map(|event| NormalizationRecord {
         rule: event.rule.to_owned(),
         field: field.to_owned(),
+        block_index,
         line_index,
         annotation_index: annotation_index.and_then(|index| u32::try_from(index).ok()),
         before: event.before,
@@ -827,20 +1092,32 @@ fn add_records(
     }));
 }
 
-fn combined_recognition_schema() -> Value {
-    json!({ "type": "json_schema", "json_schema": { "name": "subtitle_character_recognition", "strict": true, "schema": { "type": "object", "properties": { "lines": { "type": "array", "minItems": 1, "items": { "type": "object", "properties": { "text": { "type": "string" } }, "required": ["text"], "additionalProperties": false } }, "annotations": { "type": "array", "items": { "type": "object", "properties": { "line_index": { "type": "integer", "minimum": 1 }, "text": { "type": "string" }, "base": { "type": "string" }, "base_occurrence": { "type": "integer", "minimum": 1 }, "position": { "enum": ["over", "under"] } }, "required": ["line_index", "text", "base", "base_occurrence", "position"], "additionalProperties": false } }, "unreadable": { "type": "boolean" } }, "required": ["lines", "annotations", "unreadable"], "additionalProperties": false } } })
+/// The annotation object, with the placement values the direction allows.
+fn annotation_schema(writing_mode: WritingMode) -> Value {
+    json!({ "type": "object", "properties": { "line_index": { "type": "integer", "minimum": 1 }, "text": { "type": "string" }, "base": { "type": "string" }, "base_occurrence": { "type": "integer", "minimum": 1 }, "position": { "enum": prompt::ruby_placement_values(writing_mode) } }, "required": ["line_index", "text", "base", "base_occurrence", "position"], "additionalProperties": false })
+}
+
+fn combined_recognition_schema(writing_mode: WritingMode) -> Value {
+    json!({ "type": "json_schema", "json_schema": { "name": "subtitle_character_recognition", "strict": true, "schema": { "type": "object", "properties": { "lines": { "type": "array", "minItems": 1, "items": { "type": "object", "properties": { "text": { "type": "string" } }, "required": ["text"], "additionalProperties": false } }, "annotations": { "type": "array", "items": annotation_schema(writing_mode) }, "unreadable": { "type": "boolean" } }, "required": ["lines", "annotations", "unreadable"], "additionalProperties": false } } })
 }
 
 fn main_text_schema() -> Value {
     json!({ "type": "json_schema", "json_schema": { "name": "subtitle_main_text_recognition", "strict": true, "schema": { "type": "object", "properties": { "lines": { "type": "array", "minItems": 1, "items": { "type": "object", "properties": { "text": { "type": "string" } }, "required": ["text"], "additionalProperties": false } }, "unreadable": { "type": "boolean" } }, "required": ["lines", "unreadable"], "additionalProperties": false } } })
 }
 
-fn ruby_schema() -> Value {
-    json!({ "type": "json_schema", "json_schema": { "name": "subtitle_ruby_recognition", "strict": true, "schema": { "type": "object", "properties": { "annotations": { "type": "array", "items": { "type": "object", "properties": { "line_index": { "type": "integer", "minimum": 1 }, "text": { "type": "string" }, "base": { "type": "string" }, "base_occurrence": { "type": "integer", "minimum": 1 }, "position": { "enum": ["over", "under"] } }, "required": ["line_index", "text", "base", "base_occurrence", "position"], "additionalProperties": false } }, "unreadable": { "type": "boolean" } }, "required": ["annotations", "unreadable"], "additionalProperties": false } } })
+fn ruby_schema(writing_mode: WritingMode) -> Value {
+    json!({ "type": "json_schema", "json_schema": { "name": "subtitle_ruby_recognition", "strict": true, "schema": { "type": "object", "properties": { "annotations": { "type": "array", "items": annotation_schema(writing_mode) }, "unreadable": { "type": "boolean" } }, "required": ["annotations", "unreadable"], "additionalProperties": false } } })
 }
 
-fn style_schema() -> Value {
-    json!({ "type": "json_schema", "json_schema": { "name": "subtitle_whole_cue_style", "strict": true, "schema": { "type": "object", "properties": { "italic": { "type": "boolean" }, "color": { "enum": ["default", "black", "red", "orange", "yellow", "green", "cyan", "blue", "magenta"] } }, "required": ["italic", "color"], "additionalProperties": false } } })
+/// Vertical blocks are not asked about italic, so the field is not in the schema.
+fn style_schema(writing_mode: WritingMode) -> Value {
+    let color = json!({ "enum": ["default", "black", "red", "orange", "yellow", "green", "cyan", "blue", "magenta"] });
+    let schema = if writing_mode.is_vertical() {
+        json!({ "type": "object", "properties": { "color": color }, "required": ["color"], "additionalProperties": false })
+    } else {
+        json!({ "type": "object", "properties": { "italic": { "type": "boolean" }, "color": color }, "required": ["italic", "color"], "additionalProperties": false })
+    };
+    json!({ "type": "json_schema", "json_schema": { "name": "subtitle_block_style", "strict": true, "schema": schema } })
 }
 
 #[cfg(test)]
@@ -886,11 +1163,19 @@ mod tests {
         let recognition = validate_recognition(
             r#"{"lines":[{"text":"司る"}],"annotations":[{"line_index":1,"text":"つかさど","base":"司","base_occurrence":1,"position":"over"}],"unreadable":false}"#,
             Some(1),
+            WritingMode::HorizontalTb,
             language,
         )
         .expect("recognition response");
-        let (lines, _) =
-            assemble_lines(recognition, false, None, language).expect("assemble lines");
+        let (lines, _) = assemble_lines(
+            recognition,
+            false,
+            None,
+            1,
+            WritingMode::HorizontalTb,
+            language,
+        )
+        .expect("assemble lines");
         assert_eq!(lines[0].text, "司る");
         assert!(matches!(lines[0].spans[0], OcrSpan::Ruby { .. }));
     }
@@ -909,6 +1194,7 @@ mod tests {
         let ruby = validate_ruby(
             r#"{"annotations":[{"line_index":1,"text":"つかさど","base":"司","base_occurrence":1,"position":"over"}],"unreadable":false}"#,
             &normalized,
+            WritingMode::HorizontalTb,
             language,
         )
         .expect("ruby response");
@@ -918,8 +1204,15 @@ mod tests {
             unreadable: main.unreadable || ruby.unreadable,
         };
 
-        let (lines, records) =
-            assemble_lines(recognition, false, None, language).expect("assembled lines");
+        let (lines, records) = assemble_lines(
+            recognition,
+            false,
+            None,
+            1,
+            WritingMode::HorizontalTb,
+            language,
+        )
+        .expect("assembled lines");
 
         assert_eq!(lines[0].text, "（司る）");
         assert!(matches!(lines[0].spans[1], OcrSpan::Ruby { .. }));
@@ -936,6 +1229,7 @@ mod tests {
         let error = validate_ruby(
             r#"{"annotations":[{"line_index":1,"text":"かんじ","base":"漢字","base_occurrence":1,"position":"over"},{"line_index":1,"text":"じ","base":"字字幕","base_occurrence":1,"position":"over"}],"unreadable":false}"#,
             &["漢字字幕".to_owned()],
+            WritingMode::HorizontalTb,
             language,
         )
         .expect_err("overlapping ruby must fail");
@@ -949,10 +1243,12 @@ mod tests {
         let error = validate_recognition(
             r#"{"lines":[{"text":"first"}],"annotations":[],"unreadable":false}"#,
             Some(2),
+            WritingMode::HorizontalTb,
             language,
         )
         .expect_err("missing row must fail");
         assert!(error.to_string().contains("found 2"));
+        assert!(error.to_string().contains("rows"));
     }
 
     #[test]
@@ -961,13 +1257,21 @@ mod tests {
         let recognition = validate_recognition(
             r#"{"lines":[{"text":"Uは 司る人"}],"annotations":[{"line_index":1,"text":"つかさど","base":"司","base_occurrence":1,"position":"over"}],"unreadable":false}"#,
             Some(1),
+            WritingMode::HorizontalTb,
             language,
         )
         .expect("recognition response");
-        let style = validate_whole_cue_style(r#"{"italic":true,"color":"default"}"#)
-            .expect("whole cue style");
-        let (lines, _) =
-            assemble_lines(recognition, style.italic, None, language).expect("assembled line");
+        let style =
+            validate_block_style(r#"{"italic":true,"color":"default"}"#).expect("block style");
+        let (lines, _) = assemble_lines(
+            recognition,
+            style.italic,
+            None,
+            1,
+            WritingMode::HorizontalTb,
+            language,
+        )
+        .expect("assembled line");
         assert!(matches!(
             &lines[0].spans[0],
             OcrSpan::Text { styles, .. } if styles == &[TextStyle::Italic]
@@ -988,16 +1292,215 @@ mod tests {
         let recognition = validate_recognition(
             r#"{"lines":[{"text":"Alert"}],"annotations":[],"unreadable":false}"#,
             Some(1),
+            WritingMode::HorizontalTb,
             language,
         )
         .expect("recognition response");
-        let style =
-            validate_whole_cue_style(r#"{"italic":false,"color":"red"}"#).expect("whole cue style");
+        let style = validate_block_style(r#"{"italic":false,"color":"red"}"#).expect("block style");
         let color = recognized_color(&style.color).expect("known color");
-        let (lines, _) = assemble_lines(recognition, style.italic, color.as_deref(), language)
-            .expect("assembled line");
+        let (lines, _) = assemble_lines(
+            recognition,
+            style.italic,
+            color.as_deref(),
+            1,
+            WritingMode::HorizontalTb,
+            language,
+        )
+        .expect("assembled line");
 
         assert_eq!(lines[0].spans[0].color(), Some("#FF0000"));
+    }
+
+    #[test]
+    fn vertical_ruby_is_read_as_right_and_left_and_stored_as_over_and_under() {
+        let language = languages::resolve("jpn").expect("Japanese preset");
+        let response = validate_ruby(
+            r#"{"annotations":[{"line_index":1,"text":"つめ","base":"冷","base_occurrence":1,"position":"right"}],"unreadable":false}"#,
+            &["冷たい".to_owned()],
+            WritingMode::VerticalRl,
+            language,
+        )
+        .expect("vertical ruby response");
+        let recognition = RecognitionResponse {
+            lines: vec![TextValue {
+                text: "冷たい".to_owned(),
+            }],
+            annotations: response.annotations,
+            unreadable: false,
+        };
+
+        let (lines, _) = assemble_lines(
+            recognition,
+            false,
+            None,
+            1,
+            WritingMode::VerticalRl,
+            language,
+        )
+        .expect("assembled column");
+
+        // "right of the column" is the block-start side in vertical-rl, which is
+        // exactly what Over means.
+        assert!(matches!(
+            &lines[0].spans[0],
+            OcrSpan::Ruby { annotations, .. }
+                if annotations[0].position == RubyPosition::Over
+        ));
+    }
+
+    #[test]
+    fn a_direction_gets_only_the_placements_it_can_see() {
+        let language = languages::resolve("jpn").expect("Japanese preset");
+
+        assert!(
+            validate_ruby(
+                r#"{"annotations":[{"line_index":1,"text":"つめ","base":"冷","base_occurrence":1,"position":"over"}],"unreadable":false}"#,
+                &["冷たい".to_owned()],
+                WritingMode::VerticalRl,
+                language,
+            )
+            .is_err(),
+            "a vertical block is asked about right and left, never over"
+        );
+        assert!(
+            validate_ruby(
+                r#"{"annotations":[{"line_index":1,"text":"つめ","base":"冷","base_occurrence":1,"position":"right"}],"unreadable":false}"#,
+                &["冷たい".to_owned()],
+                WritingMode::HorizontalTb,
+                language,
+            )
+            .is_err()
+        );
+        assert_eq!(
+            style_schema(WritingMode::VerticalRl)["json_schema"]["schema"]["required"],
+            json!(["color"])
+        );
+    }
+
+    #[test]
+    fn a_vertical_block_counts_columns_not_rows() {
+        let language = languages::resolve("jpn").expect("Japanese preset");
+        let error = validate_recognition(
+            r#"{"lines":[{"text":"冷たい！"}],"annotations":[],"unreadable":false}"#,
+            Some(2),
+            WritingMode::VerticalRl,
+            language,
+        )
+        .expect_err("a missing column must fail");
+
+        assert!(error.to_string().contains("columns"));
+    }
+
+    #[test]
+    fn the_glyph_count_tolerates_the_estimate_being_off_by_one() {
+        let prompt = BlockPrompt {
+            expected_glyphs: vec![4, 10],
+            ..BlockPrompt::default()
+        };
+        let lines = |first: &str, second: &str| {
+            vec![
+                TextValue {
+                    text: first.to_owned(),
+                },
+                TextValue {
+                    text: second.to_owned(),
+                },
+            ]
+        };
+
+        assert!(glyph_mismatch(&lines("冷たい！", "ながくもがなとおも"), &prompt).is_none());
+        assert!(glyph_mismatch(&lines("冷たい！です", "ながくもがなとおもい"), &prompt).is_some());
+    }
+
+    #[test]
+    fn a_glyph_estimate_for_the_wrong_number_of_units_is_not_checked() {
+        // The unit count is the hard check; if it disagreed the response would
+        // never reach here, so comparing per-unit counts would be nonsense.
+        let prompt = BlockPrompt {
+            expected_glyphs: vec![4],
+            ..BlockPrompt::default()
+        };
+        let lines = vec![
+            TextValue {
+                text: "冷たい！".to_owned(),
+            },
+            TextValue {
+                text: "ずっとながい行".to_owned(),
+            },
+        ];
+
+        assert!(glyph_mismatch(&lines, &prompt).is_none());
+    }
+
+    #[test]
+    fn a_glyph_mismatch_asks_for_review_and_an_unasked_italic_does_not() {
+        let mismatch = glyph_issue(
+            2,
+            WritingMode::VerticalRl,
+            &GlyphMismatch {
+                unit: 1,
+                expected: 4,
+                actual: 9,
+            },
+        );
+
+        assert_eq!(mismatch.severity, ValidationSeverity::Warning);
+        assert_eq!(mismatch.path.as_deref(), Some("blocks[2].lines[1]"));
+        assert!(mismatch.message.contains("column 1"));
+        assert!(ValidationIssue::any_needs_review(&[mismatch]));
+
+        // Every vertical block would otherwise carry a review flag, which would
+        // leave the flag meaning nothing.
+        assert!(!ValidationIssue::any_needs_review(&[ValidationIssue {
+            code: "vertical_italic_not_assessed".to_owned(),
+            severity: ValidationSeverity::Info,
+            stage: "style_recognition".to_owned(),
+            path: None,
+            message: String::new(),
+            codepoint: None,
+        }]));
+    }
+
+    #[test]
+    fn a_block_the_analyzer_declined_to_split_is_sent_untouched() {
+        let png = single_pixel_png();
+        let whole = BlockLayout {
+            bounds: rosettacue_layout::Rect {
+                x: 0,
+                y: 0,
+                width: 1,
+                height: 1,
+            },
+            writing_mode: WritingMode::HorizontalTb,
+            source: BlockSource::WholeCue,
+            units: None,
+            em: 0,
+            expected_glyphs: Vec::new(),
+            evidence: rosettacue_layout::ModeEvidence {
+                row_bands: 0,
+                column_bands: 0,
+                aspect_ratio_milli: 1000,
+                rule: rosettacue_layout::ModeRule::Fallback,
+            },
+        };
+
+        assert_eq!(
+            block_image(&png, &whole).expect("whole-cue image"),
+            png,
+            "a degraded cue must produce the request it produced before blocks"
+        );
+    }
+
+    fn single_pixel_png() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut bytes, 1, 1);
+            encoder.set_color(png::ColorType::Rgb);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut writer = encoder.write_header().expect("PNG header");
+            writer.write_image_data(&[0, 0, 0]).expect("PNG pixels");
+        }
+        bytes
     }
 
     #[test]

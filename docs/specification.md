@@ -186,11 +186,14 @@ flowchart LR
   Core --> Bluray["crates/bluray"]
   Core --> PGS["crates/pgs"]
   Core --> OCR["crates/ocr"]
+  Core --> Layout["crates/layout"]
   Core --> Translation["crates/translation"]
   Core --> Export["crates/export"]
   Project --> Domain
   Bluray --> Domain
+  Layout --> Domain
   OCR --> Domain
+  OCR --> Layout
   OCR --> LLM["crates/llm"]
   Translation --> Domain
   Translation --> LLM
@@ -523,18 +526,49 @@ The current project schema version is **1**. Opening a package requires `PRAGMA 
 {
   "start_ms": 67,
   "end_ms": 2611,
-  "position": "bottom-center",
   "subtitle": {
-    "prompt_version": "subtitle-ocr-v5",
+    "prompt_version": "subtitle-ocr-v7",
     "provider": "lmstudio",
     "model": "gemma-4-31b-it",
     "language": "jpn",
     "unreadable": false,
-    "lines": [],
+    "blocks": [
+      {
+        "bounds": { "x": 990, "y": 21, "width": 52, "height": 216 },
+        "writing_mode": "vertical_rl",
+        "position": "top-right",
+        "source": "detected",
+        "lines": []
+      },
+      {
+        "bounds": { "x": 20, "y": 614, "width": 537, "height": 113 },
+        "writing_mode": "horizontal_tb",
+        "position": "bottom-left",
+        "source": "detected",
+        "lines": []
+      }
+    ],
     "normalizations": []
   }
 }
 ```
+
+A Cue holds one or more text blocks in reading order. A block is a spatially
+separated run of subtitle text with its own bounding box in canvas coordinates,
+its own writing direction, and its own nine-grid position. A Cue whose bitmap
+holds a single run of text is a document with one block; there is no separate
+representation for that case.
+
+`writing_mode` is either `horizontal_tb` or `vertical_rl`, named after the CSS
+Writing Modes values the renderer passes through. `source` records where the
+boundary came from: `detected` when layout analysis separated it, `whole_cue`
+when analysis was not confident and the whole bitmap is treated as one block,
+and `manual` when a person created or moved it.
+
+The Cue edit document carries no position of its own. A Cue can hold blocks in
+different places, so a single Cue-level position would necessarily disagree with
+at least one block. Formats that permit only one position take the first block
+in reading order and record an export warning.
 
 ### 7.2 Text, ruby, and styles
 
@@ -568,7 +602,18 @@ The current project schema version is **1**. Opening a package requires `PRAGMA 
 }
 ```
 
-Ruby is named after the typographic ruby annotation convention. `base` is the exact character range receiving the annotation. `annotations[].text` is displayed above (`over`) or below (`under`) that range. This representation can express both Japanese furigana and non-language-specific interlinear annotation without embedding custom XML into plain text.
+Ruby is named after the typographic ruby annotation convention. `base` is the exact character range receiving the annotation. This representation can express both Japanese furigana and non-language-specific interlinear annotation without embedding custom XML into plain text.
+
+`annotations[].position` is relative to the block's writing direction and carries
+the CSS `ruby-position` meaning exactly. `over` is the block-start side: above
+the line in horizontal writing, and to the right of the column in vertical
+writing, which is where standard furigana sits. `under` is the opposite side.
+Keeping the two values relative rather than adding physical `right` and `left`
+variants means the combinations that cannot exist — "above" in vertical writing —
+cannot be written down, so no layer has to re-check that invariant. Providers are
+asked in physical terms they can see (`right`/`left` for a vertical block), and
+the OCR validator folds the answer onto these two values at the single point
+where the two vocabularies meet.
 
 Every text and ruby span has a required `styles` array. The allowed values are `bold`, `italic`, `underline`, `strikethrough`, `superscript`, and `subscript`; an unstyled span uses an empty array. A span may also contain an optional uppercase `#RRGGBB` `color`. Missing color means the default white subtitle foreground, so white is never stored as an explicit color. No line-level style summary exists. Adjacent runs may have different styles and colors, enabling human reviewers to format selected ranges. A ruby span applies one style array and color to its complete base range. Style values are unique and canonicalized in a fixed order. `superscript` and `subscript` are mutually exclusive on the same span.
 
@@ -586,7 +631,20 @@ middle-left    middle-center    middle-right
 bottom-left    bottom-center    bottom-right
 ```
 
-PGS geometry stores exact canvas and bitmap coordinates. The semantic position is derived by dividing the Cue center into a deterministic 3×3 canvas grid. A human revision may override the semantic position without rewriting original PGS geometry.
+PGS geometry stores exact canvas and bitmap coordinates. The semantic position is
+derived by dividing a rectangle's center into a deterministic 3×3 canvas grid.
+Cue-level and block-level placement use the same grid rule: a Cue's own position
+is the position of the rectangle covering its whole bitmap.
+
+A block's `bounds` are in canvas coordinates, not bitmap pixels. Layout analysis
+works in bitmap pixels, and the conversion — the exported PNG may be larger than
+the tight bitmap rectangle, with the margin shared evenly on each axis — happens
+once, in `CueGeometry::canvas_bounds`, so preview overlays, the editor, and
+export all inherit one definition of it.
+
+A human revision may override a block's semantic position without rewriting
+original PGS geometry, and may reorder blocks when the geometric reading-order
+guess is wrong.
 
 ### 7.4 Canonical-versus-derived rule
 
@@ -594,7 +652,7 @@ JSON export retains:
 
 - Cue identity and index;
 - timing;
-- nine-grid position;
+- per-block bounds, writing direction, nine-grid position, and provenance;
 - geometry and forced/inferred flags;
 - review status;
 - image hash;
@@ -602,7 +660,7 @@ JSON export retains:
 - ruby spans;
 - OCR provenance and normalization records.
 
-SRT retains sequence and timing, writes commonly supported inline `<b>`, `<i>`, and `<u>` markup, flattens ruby to its base text, and omits strikethrough, superscript, subscript, and font color with export warnings. RosettaCue does not emit SRT color markup. Position, geometry, ruby placement, font information, unsupported formats, provenance, and review history remain available in the project and JSON. This policy reflects SRT's limited, player-dependent HTML-derived formatting and absence of portable placement or ruby semantics ([Library of Congress format description](https://www.loc.gov/preservation/digital/formats/fdd/fdd000569.shtml), [Matroska subtitle notes](https://www.matroska.org/technical/subtitles.html)). Future ASS export may map the richer style set and placement. WebVTT is a separate candidate when standardized ruby cue spans are needed ([W3C WebVTT](https://www.w3.org/TR/2026/CRD-webvtt1-20260520/)). Ruby remains canonical project data even where the target format needs layout-based emulation.
+SRT retains sequence and timing, writes commonly supported inline `<b>`, `<i>`, and `<u>` markup, flattens ruby to its base text, joins a Cue's blocks into one run of lines, writes vertical text out horizontally, and omits placement, strikethrough, superscript, subscript, and font color. Every loss is reported as an export warning carrying a stable code and the Cue index; the user interface picks the localized sentence from the code, and each kind of loss is reported once per Cue. RosettaCue does not emit SRT color markup. Position, geometry, ruby placement, font information, unsupported formats, provenance, and review history remain available in the project and JSON. This policy reflects SRT's limited, player-dependent HTML-derived formatting and absence of portable placement or ruby semantics ([Library of Congress format description](https://www.loc.gov/preservation/digital/formats/fdd/fdd000569.shtml), [Matroska subtitle notes](https://www.matroska.org/technical/subtitles.html)). Future ASS export may map the richer style set and placement. WebVTT is a separate candidate when standardized ruby cue spans are needed ([W3C WebVTT](https://www.w3.org/TR/2026/CRD-webvtt1-20260520/)). Ruby remains canonical project data even where the target format needs layout-based emulation.
 
 ## 8. Detailed workflows
 
@@ -700,30 +758,87 @@ The UI can begin Cue review as soon as Cue events arrive; extraction completion 
 
 ```mermaid
 flowchart TD
-  Input["Cue PNG + language preference"] --> Rows["Foreground projection: estimate large main rows"]
-  Rows --> Mode{"Separate ruby phase?"}
+  Input["Cue PNG + language preference"] --> Analyze["Layout analysis: blocks, direction, unit and glyph counts"]
+  Analyze --> Confident{"Confident?"}
+  Confident -->|No| Whole["One whole-cue block, no unit constraint, uncropped"]
+  Confident -->|Yes| Crop["Tight crop per block"]
+  Whole --> Loop
+  Crop --> Loop["For each block in reading order"]
+  Loop --> Mode{"Separate ruby phase?"}
   Mode -->|No| Combined["Phase 1: main text + ruby recognition"]
-  Combined --> ValidateCombined{"Text, row count, and ruby ranges valid?"}
+  Combined --> ValidateCombined{"Text, unit count, and ruby ranges valid?"}
   ValidateCombined -->|No| RetryCombined["Bounded corrective retry"] --> Combined
   Mode -->|Yes| Main["Phase 1: main-text recognition"]
-  Main --> ValidateMain{"Text schema and row count valid?"}
+  Main --> ValidateMain{"Text schema and unit count valid?"}
   ValidateMain -->|No| RetryMain["Bounded corrective retry"] --> Main
   ValidateMain -->|Yes| Canonical["Language-specific main-text normalization"]
   Canonical --> Ruby["Phase 2: ruby recognition"]
   Ruby --> ValidateRuby{"Annotation schema and exact ranges valid?"}
   ValidateRuby -->|No| RetryRuby["Bounded corrective retry"] --> Ruby
-  ValidateCombined -->|Yes| Style["Whole-Cue italic + color recognition"]
-  ValidateRuby -->|Yes| Style
-  Style --> ValidateStyle{"Italic boolean and conservative color valid?"}
+  ValidateCombined -->|Yes| Pitch
+  ValidateRuby -->|Yes| Pitch{"Glyph count within one of the estimate?"}
+  Pitch -->|"No, first time"| Hint["One corrective pass"] --> Main
+  Pitch -->|"No, again"| Flag["Record ValidationIssue and accept"]
+  Pitch -->|Yes| Style
+  Flag --> Style["Block style: color, plus italic for horizontal blocks"]
+  Style --> ValidateStyle{"Conservative color valid?"}
   ValidateStyle -->|No| RetryStyle["Bounded corrective retry"] --> Style
   ValidateStyle -->|Yes| Normalize["Span assembly"]
-  Normalize --> Persist["Attempt + recognition + OCR revision"]
+  Normalize --> Loop
+  Loop --> Persist["Attempt + issues + recognition + OCR revision"]
   Persist --> Event["Publish cue-complete"]
 ```
 
 Recognition, optional ruby, and validation profiles may use different providers and models. With `ruby: null`, Phase 1 uses `recognition` for main characters and ruby/furigana in one image request, followed by style recognition. With a Ruby provider present, Phase 1 recognizes only large main text, the normalized main lines are supplied to the Ruby provider for Phase 2, and style recognition becomes Phase 3. The Ruby response contains annotations only and must reference an exact base substring in the supplied normalized lines. All OCR profiles require vision-capable models. Provider configuration is validated before the job begins; the Ruby profile is required only in separate mode. Translation is a separate text-only operation after OCR.
 
-Before the first provider request, the OCR crate decodes the PNG and projects foreground pixels onto the vertical axis. Contiguous row clusters near the maximum glyph-row height are counted as likely large main rows; shorter clusters are treated as ruby candidates. When the estimate is reliable, the stage responsible for main-text recognition must return exactly that many main lines. A mismatch is rejected and retried, preventing a syntactically valid one-line response from silently dropping a second visible row. The estimate recognizes layout only and never substitutes for character OCR.
+Before the first provider request, the `rosettacue-layout` crate reduces the PNG
+to a foreground mask and answers three questions about it without recognizing a
+character: where the Cue's text blocks are, which way each one runs, and how many
+units — rows in horizontal writing, columns in vertical writing — and glyphs each
+should hold. Blocks are separated by an X-Y cut at blank runs wider than two em,
+where the em is bootstrapped from the smaller of the two per-axis median band
+extents; along the axis text flows, glyph bands merge, so the smaller median
+reads the em off whichever axis is clean without knowing the direction yet.
+Direction is decided by block shape first, with band counts settling only blocks
+close to square. Unit counting keeps the existing rule that a band shorter than
+72% of the longest is annotation rather than main text, which separates ruby rows
+from main rows horizontally and ruby columns from main columns vertically.
+
+Analysis never fails. No foreground, more fragments than the cap, or an
+undecidable direction all degrade to one horizontal block covering the whole
+Cue with no unit constraint, sent uncropped — byte for byte the request the
+pipeline made before blocks existed. That bound is what makes a wrong layout
+answer harmless.
+
+Each block is then recognized on its own, cropped to its bounds with a small
+padding so antialiased edges survive, and described to the provider in its own
+direction. Cropping also matters for resolution: a provider's image budget is
+fixed per request, so a block occupying a tenth of the canvas arrives at roughly
+ten times the effective resolution the full canvas gave it.
+
+Validation strength follows how much each signal is worth. The unit count is
+hard: counting bands over a flat background is reliable, and a wrong count means
+a dropped or invented line, so a mismatch is rejected and retried. The glyph
+count is soft: it divides ink length by an advance measured from that same ink,
+so it drifts over a long unit. A disagreement of more than one character buys a
+single corrective pass; if it survives that, the transcription stands and the
+disagreement is recorded as a `ValidationIssue` on the attempt, which sends the
+Cue to review rather than to failure.
+
+Vertical blocks are asked about ruby in physical terms — `right` and `left` —
+and never asked about italic at all, since its defining slant is measured
+against a horizontal baseline that vertical writing does not have. The unasked
+question is recorded at info severity, which deliberately does not put every
+vertical block into the review queue.
+
+Writing direction is part of the cached prompt prefix. It has two values, so at
+worst a stage keeps two cache entries and both still hit; moving the direction
+wording into the per-block half would end prefix sharing outright.
+
+`rosettacue ocr layout-survey <project>` runs the analysis alone over every Cue
+of a project and reports the block-count distribution, the writing-mode split,
+the mixed-direction and degraded counts, and how often each analyzer doubt was
+raised, without contacting a provider.
 
 For Japanese, normalization records every change and applies language-specific
 punctuation and character rules. The canonical long-vowel mark is `ー`;
@@ -1017,11 +1132,20 @@ Inspector is the resizable lower panel beneath Cue Comparison. It is the only ti
 - visible OCR status beside the Inspector title rather than inside timing controls;
 - Cue revision-history viewing, a visible revision count beside its icon, restoration, and guarded deletion that retains at least one revision;
 - WYSIWYG text editing with selection-based bold, italic, underline, strikethrough, superscript, subscript, and font-color controls;
-- selection-based ruby creation, editing, removal, and over/under placement within one subtitle line;
+- selection-based ruby creation, editing, removal, and placement within one subtitle line;
 - preservation of ruby spans while editing surrounding styled ranges;
 - start/end timestamp editing;
-- direct nine-grid position editing through an accessible 3×3 button grid;
+- direct nine-grid position editing through an accessible 3×3 button grid, applied to the selected text block;
 - explicit **Save Cue** action.
+
+A Cue with more than one text block additionally shows a block tab strip with
+each block's writing direction, a direction toggle, and controls to move a block
+earlier or later in reading order — the geometric reading-order guess has to be
+correctable. Text editing, placement, and direction all apply to the selected
+block; a selection spanning two blocks is not offered, because different blocks
+mean a different speaker, colour, or direction and formatting across that
+boundary is not a meaningful edit. A Cue with one block shows none of this and
+looks exactly as it did before blocks existed.
 
 The Save button is disabled until the draft differs from the latest effective revision. Timestamps use `HH:MM:SS.mmm`; End must be later than Start.
 
@@ -1038,7 +1162,7 @@ Supported providers are LM Studio, Ollama, OpenAI API, and Anthropic API. A prof
 
 OpenAI reasoning models take the output cap as `max_completion_tokens` and reject the sampling parameters local OpenAI-compatible servers rely on for determinism, so the two dialects build different request bodies. Reasoning tokens are billed at the output rate and the server-side default is not `none`, so every OpenAI profile defaults to `reasoning_effort: none`: recognition, style, and translation are transcription tasks that gain no accuracy from deliberation.
 
-Recognition, ruby, style, and translation prompts are each split into a stable half — task and language guidance plus the response schema, byte-identical for every Cue at that stage — and a per-Cue half carrying the deterministic row estimate or the already-recognized main lines. Anthropic requests place a cache breakpoint at the end of the stable half; OpenAI requests fold it into the system turn so automatic prefix caching can match it. Providers that do not cache are unaffected, because the two halves are concatenated in order.
+Recognition, ruby, style, and translation prompts are each split into a stable half — task, direction, and language guidance plus the response schema, byte-identical for every block at that stage, language, and writing direction — and a per-block half carrying the deterministic unit and glyph estimates or the already-recognized main lines. Writing direction belongs to the stable half: it has two values, so a stage keeps at most two cache entries and both still hit, whereas moving the direction wording into the per-block half would break prefix sharing outright. Anthropic requests place a cache breakpoint at the end of the stable half; OpenAI requests fold it into the system turn so automatic prefix caching can match it. Providers that do not cache are unaffected, because the two halves are concatenated in order.
 
 ### 10.7 Theme and component system
 
@@ -1296,14 +1420,17 @@ A packaged smoke test verifies:
 15. IPC methods and events must be present in both main/preload allowlists.
 16. Standard output from the sidecar contains only one JSON object per line.
 17. Project opening rejects every schema version other than the current version.
-18. A reliable bitmap row estimate and the accepted main-text stage line count must agree.
+18. A reliable bitmap unit estimate and the accepted main-text stage line count must agree, per block. A glyph-count estimate that disagrees by more than one records a validation issue and sends the Cue to review; it never rejects the transcription.
 19. Styled spans compose exactly to `OcrLine.text`; every span has a required canonical style array and at most one optional `#RRGGBB` color.
 20. A span cannot contain duplicate styles or both superscript and subscript.
-21. A ruby annotation has a non-empty exact base range within one line and at least one non-empty over/under annotation.
+21. A ruby annotation has a non-empty exact base range within one line and at least one non-empty annotation, placed `over` or `under` relative to its block's writing direction.
 22. Adjacent ordinary text spans with identical canonical style arrays and colors are maximally coalesced; ruby boundaries are preserved.
 23. Revision deletion retains at least one effective revision for the Cue and invalidates its review status.
 24. `ruby: null` selects combined text/ruby recognition; a Ruby provider selects ordered main-text, ruby, and style phases.
 25. Separate Ruby annotations are validated against language-normalized main lines before persistence.
+26. Layout analysis never fails: weak evidence degrades to one whole-Cue horizontal block, sent uncropped and unconstrained.
+27. A Cue edit document holds at least one block, and every block holds at least one line.
+28. A block's `bounds` are canvas coordinates, converted from bitmap pixels exactly once by `CueGeometry::canvas_bounds`.
 
 ## 18. Conformance summary
 
@@ -1314,9 +1441,10 @@ The current baseline conforms to the following functional surface:
 - right-aligned ribbon statistics and native title-bar alignment;
 - resizable Cue List and vertically split Preview/Inspector editing surface;
 - structured side-by-side Cue rendering in one shared Blu-ray canvas coordinate system;
-- selectable row-count-verified OCR with combined text/ruby recognition or ordered main-text and dedicated Ruby phases, followed by conservative whole-Cue italic/color recognition;
-- selection-based rich subtitle editing with six structured span styles, font color, and editable over/under ruby;
-- explicit Cue draft save with content, timing, and position editing;
+- deterministic per-Cue layout analysis into ordered text blocks with per-block writing direction, and unit-count-verified OCR per block with combined text/ruby recognition or ordered main-text and dedicated Ruby phases, followed by conservative per-block italic/color recognition;
+- selection-based rich subtitle editing with six structured span styles, font color, and editable ruby placed relative to the writing direction;
+- per-block editing of a multi-block Cue: tab strip, direction toggle, placement, and reading order;
+- explicit Cue draft save with content, timing, and per-block placement editing;
 - project clone, source import, PGS extraction, export dialogs;
 - independent task model settings and provider diagnostics;
 - selected/all OCR with pause, resume, and stop;

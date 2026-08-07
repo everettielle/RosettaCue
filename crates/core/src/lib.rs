@@ -1,6 +1,10 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
+mod layout_survey;
+
+use layout_survey::SurveyBuilder;
+pub use layout_survey::{CueLayoutBlock, CueLayoutSummary, LayoutSurvey, LayoutSurveyError};
 pub use rosettacue_bluray::configure_media_tools_directory;
 pub use rosettacue_bluray::{MediaToolDiagnostic, MediaToolOrigin};
 use rosettacue_domain::{
@@ -313,7 +317,6 @@ impl Application {
         let document = CueEditDocument {
             start_ms: cue.start_ms,
             end_ms: cue.end_ms,
-            position: cue.position,
             subtitle: recognition.document,
         };
         Ok(store.save_cue_revision(cue_id, &document)?)
@@ -537,16 +540,34 @@ impl Application {
         image_path: impl AsRef<Path>,
     ) -> Result<Vec<u8>, CueImageError> {
         let store = ProjectStore::open(project_path)?;
-        let allowed_root = store.root().join("assets/cues").canonicalize()?;
-        let relative = image_path.as_ref();
-        if relative.is_absolute() {
-            return Err(CueImageError::OutsideProject);
+        Ok(std::fs::read(confined_cue_path(&store, image_path)?)?)
+    }
+
+    /// Analyzes every cue bitmap and reports how the project's layouts break down.
+    ///
+    /// No provider is contacted: this is the deterministic half of recognition,
+    /// run on its own to size up a track before paying to recognize it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the project cannot be opened or the language has
+    /// no preset. A cue whose bitmap cannot be read is counted and reported,
+    /// not raised.
+    pub fn survey_cue_layout(
+        self,
+        project_path: impl AsRef<Path>,
+        language: &str,
+    ) -> Result<LayoutSurvey, LayoutSurveyError> {
+        let store = ProjectStore::open(project_path)?;
+        let options = rosettacue_ocr::layout_options(language)?;
+        let mut builder = SurveyBuilder::default();
+        for cue in store.cues()? {
+            match read_cue_layout(&store, &cue, &options) {
+                Ok(layout) => builder.add(&cue, &layout),
+                Err(error) => builder.add_failure(&cue, &error),
+            }
         }
-        let candidate = store.root().join(relative).canonicalize()?;
-        if !candidate.starts_with(allowed_root) {
-            return Err(CueImageError::OutsideProject);
-        }
-        Ok(std::fs::read(candidate)?)
+        Ok(builder.finish())
     }
 
     /// Lists models currently visible to LM Studio's local server.
@@ -709,6 +730,7 @@ impl Application {
                 image_path,
                 image_sha256: cue.image_sha256.clone(),
                 language: language.to_owned(),
+                geometry: cue.geometry.clone(),
             };
             match backend.recognize(&request) {
                 Ok(result) => {
@@ -717,6 +739,7 @@ impl Application {
                         run_id,
                         &result.raw_response,
                         &result.document,
+                        &result.issues,
                         result.elapsed_ms,
                     )?;
                     progress(OcrProgress {
@@ -1142,18 +1165,41 @@ impl OcrProgress {
     }
 }
 
+/// Reads and analyzes one cue bitmap, keeping every per-cue failure local.
+fn read_cue_layout(
+    store: &ProjectStore,
+    cue: &SubtitleCue,
+    options: &rosettacue_ocr::LayoutOptions,
+) -> Result<rosettacue_ocr::CueLayout, Box<dyn std::error::Error>> {
+    let image = std::fs::read(confined_cue_path(store, &cue.image_path)?)?;
+    Ok(rosettacue_layout::analyze_png(&image, options)?)
+}
+
+/// Why a cue image could not be resolved to a path inside the project.
+#[derive(Debug, thiserror::Error)]
+pub enum ConfinedCuePathError {
+    #[error("cue image path is outside the project")]
+    OutsideProject,
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+}
+
+/// Resolves a stored cue image path, refusing anything outside the cue directory.
+///
+/// Every reader of a cue bitmap goes through here, so the confinement rule has
+/// one definition rather than one per caller.
 fn confined_cue_path(
     store: &ProjectStore,
-    image_path: &str,
-) -> Result<std::path::PathBuf, OcrJobError> {
+    image_path: impl AsRef<Path>,
+) -> Result<std::path::PathBuf, ConfinedCuePathError> {
     let allowed_root = store.root().join("assets/cues").canonicalize()?;
-    let relative = Path::new(image_path);
+    let relative = image_path.as_ref();
     if relative.is_absolute() {
-        return Err(OcrJobError::OutsideProject);
+        return Err(ConfinedCuePathError::OutsideProject);
     }
     let candidate = store.root().join(relative).canonicalize()?;
     if !candidate.starts_with(allowed_root) {
-        return Err(OcrJobError::OutsideProject);
+        return Err(ConfinedCuePathError::OutsideProject);
     }
     Ok(candidate)
 }
@@ -1244,80 +1290,104 @@ fn validate_cue_edit(document: &CueEditDocument) -> Result<(), CueEditError> {
             "the cue end time must be later than its start time".to_owned(),
         ));
     }
-    if document.subtitle.lines.is_empty() {
+    if document.subtitle.blocks.is_empty() {
+        return Err(CueEditError::Invalid(
+            "the subtitle must contain at least one text block".to_owned(),
+        ));
+    }
+    if document.subtitle.line_count() == 0 {
         return Err(CueEditError::Invalid(
             "the subtitle must contain at least one line".to_owned(),
         ));
     }
-    for (line_index, line) in document.subtitle.lines.iter().enumerate() {
-        if line.text.is_empty() || line.text.chars().any(char::is_control) {
+    let blocks = document.subtitle.blocks.len();
+    for (block_index, block) in document.subtitle.blocks.iter().enumerate() {
+        if block.lines.is_empty() {
             return Err(CueEditError::Invalid(format!(
-                "subtitle line {} is empty or contains control characters",
-                line_index + 1
+                "subtitle block {} has no lines",
+                block_index + 1
             )));
         }
-        if line.spans.is_empty() {
+        for (line_index, line) in block.lines.iter().enumerate() {
+            validate_line(line, &line_label(blocks, block_index, line_index))?;
+        }
+    }
+    Ok(())
+}
+
+/// Names a line the way a person reading the error can find it.
+///
+/// A cue with one block keeps the plain "line N" it always had; only a cue that
+/// actually has blocks pays the cost of saying which.
+fn line_label(blocks: usize, block_index: usize, line_index: usize) -> String {
+    if blocks > 1 {
+        format!("block {} line {}", block_index + 1, line_index + 1)
+    } else {
+        format!("line {}", line_index + 1)
+    }
+}
+
+fn validate_line(line: &rosettacue_domain::OcrLine, label: &str) -> Result<(), CueEditError> {
+    if line.text.is_empty() || line.text.chars().any(char::is_control) {
+        return Err(CueEditError::Invalid(format!(
+            "subtitle {label} is empty or contains control characters"
+        )));
+    }
+    if line.spans.is_empty() {
+        return Err(CueEditError::Invalid(format!(
+            "subtitle {label} has no text spans"
+        )));
+    }
+    let mut composed = String::new();
+    for span in &line.spans {
+        let styles = span.styles();
+        if span
+            .color()
+            .is_some_and(|color| !is_valid_text_color(color))
+        {
             return Err(CueEditError::Invalid(format!(
-                "subtitle line {} has no text spans",
-                line_index + 1
+                "subtitle {label} contains an invalid text color"
             )));
         }
-        let mut composed = String::new();
-        for span in &line.spans {
-            let styles = span.styles();
-            if span
-                .color()
-                .is_some_and(|color| !is_valid_text_color(color))
-            {
-                return Err(CueEditError::Invalid(format!(
-                    "subtitle line {} contains an invalid text color",
-                    line_index + 1
-                )));
-            }
-            if styles
-                .iter()
-                .enumerate()
-                .any(|(index, style)| styles[..index].contains(style))
-            {
-                return Err(CueEditError::Invalid(format!(
-                    "subtitle line {} contains duplicate text styles",
-                    line_index + 1
-                )));
-            }
-            if styles.contains(&rosettacue_domain::TextStyle::Superscript)
-                && styles.contains(&rosettacue_domain::TextStyle::Subscript)
-            {
-                return Err(CueEditError::Invalid(format!(
-                    "subtitle line {} contains conflicting baseline styles",
-                    line_index + 1
-                )));
-            }
-            match span {
-                OcrSpan::Text { text, .. } => composed.push_str(text),
-                OcrSpan::Ruby {
-                    base, annotations, ..
-                } => {
-                    if base.is_empty()
-                        || annotations.is_empty()
-                        || annotations
-                            .iter()
-                            .any(|annotation| annotation.text.is_empty())
-                    {
-                        return Err(CueEditError::Invalid(format!(
-                            "subtitle line {} contains an incomplete ruby span",
-                            line_index + 1
-                        )));
-                    }
-                    composed.push_str(base);
+        if styles
+            .iter()
+            .enumerate()
+            .any(|(index, style)| styles[..index].contains(style))
+        {
+            return Err(CueEditError::Invalid(format!(
+                "subtitle {label} contains duplicate text styles"
+            )));
+        }
+        if styles.contains(&rosettacue_domain::TextStyle::Superscript)
+            && styles.contains(&rosettacue_domain::TextStyle::Subscript)
+        {
+            return Err(CueEditError::Invalid(format!(
+                "subtitle {label} contains conflicting baseline styles"
+            )));
+        }
+        match span {
+            OcrSpan::Text { text, .. } => composed.push_str(text),
+            OcrSpan::Ruby {
+                base, annotations, ..
+            } => {
+                if base.is_empty()
+                    || annotations.is_empty()
+                    || annotations
+                        .iter()
+                        .any(|annotation| annotation.text.is_empty())
+                {
+                    return Err(CueEditError::Invalid(format!(
+                        "subtitle {label} contains an incomplete ruby span"
+                    )));
                 }
+                composed.push_str(base);
             }
         }
-        if composed != line.text {
-            return Err(CueEditError::Invalid(format!(
-                "subtitle line {} does not match its structured spans",
-                line_index + 1
-            )));
-        }
+    }
+    if composed != line.text {
+        return Err(CueEditError::Invalid(format!(
+            "subtitle {label} does not match its structured spans"
+        )));
     }
     Ok(())
 }
@@ -1438,8 +1508,8 @@ pub enum PgsExtractionError {
 
 #[derive(Debug, thiserror::Error)]
 pub enum CueImageError {
-    #[error("cue image path is outside the project")]
-    OutsideProject,
+    #[error(transparent)]
+    CuePath(#[from] ConfinedCuePathError),
     #[error(transparent)]
     Project(#[from] ProjectError),
     #[error(transparent)]
@@ -1482,8 +1552,8 @@ pub enum OcrJobError {
     CueNotFound,
     #[error("too many cues were selected")]
     TooManyCues,
-    #[error("cue image path is outside the project")]
-    OutsideProject,
+    #[error(transparent)]
+    CuePath(#[from] ConfinedCuePathError),
     #[error("persistent OCR job was not found")]
     PersistentJobNotFound,
     #[error("persistent OCR job is not resumable")]
@@ -1520,32 +1590,54 @@ pub enum TranslationJobError {
 mod tests {
     use super::*;
     use rosettacue_domain::{
-        OcrDocument, OcrLine, RubyAnnotation, RubyPosition, SubtitlePosition, TextStyle,
+        BlockBounds, BlockSource, OcrDocument, OcrLine, RubyAnnotation, RubyPosition,
+        SubtitlePosition, TextBlock, TextStyle, WritingMode,
     };
+
+    fn ruby_line() -> OcrLine {
+        OcrLine {
+            text: "物語".to_owned(),
+            spans: vec![OcrSpan::Ruby {
+                base: "物語".to_owned(),
+                annotations: vec![RubyAnnotation {
+                    text: "ものがたり".to_owned(),
+                    position: RubyPosition::Over,
+                }],
+                styles: vec![TextStyle::Italic],
+                color: None,
+            }],
+        }
+    }
+
+    fn text_block(position: SubtitlePosition, lines: Vec<OcrLine>) -> TextBlock {
+        TextBlock {
+            bounds: BlockBounds {
+                x: 700,
+                y: 850,
+                width: 520,
+                height: 80,
+            },
+            writing_mode: WritingMode::HorizontalTb,
+            position,
+            source: BlockSource::Detected,
+            lines,
+        }
+    }
 
     fn valid_edit() -> CueEditDocument {
         CueEditDocument {
             start_ms: 100,
             end_ms: 900,
-            position: SubtitlePosition::BottomCenter,
             subtitle: OcrDocument {
                 prompt_version: "test".to_owned(),
                 provider: "test".to_owned(),
                 model: "test".to_owned(),
                 language: "jpn".to_owned(),
                 unreadable: false,
-                lines: vec![OcrLine {
-                    text: "物語".to_owned(),
-                    spans: vec![OcrSpan::Ruby {
-                        base: "物語".to_owned(),
-                        annotations: vec![RubyAnnotation {
-                            text: "ものがたり".to_owned(),
-                            position: RubyPosition::Over,
-                        }],
-                        styles: vec![TextStyle::Italic],
-                        color: None,
-                    }],
-                }],
+                blocks: vec![text_block(
+                    SubtitlePosition::BottomCenter,
+                    vec![ruby_line()],
+                )],
                 normalizations: Vec::new(),
             },
         }
@@ -1556,7 +1648,7 @@ mod tests {
         assert!(validate_cue_edit(&valid_edit()).is_ok());
 
         let mut mismatched = valid_edit();
-        mismatched.subtitle.lines[0].text = "別の文字".to_owned();
+        mismatched.subtitle.blocks[0].lines[0].text = "別の文字".to_owned();
         assert!(matches!(
             validate_cue_edit(&mismatched),
             Err(CueEditError::Invalid(_))
@@ -1570,7 +1662,7 @@ mod tests {
         ));
 
         let mut conflicting_baseline = valid_edit();
-        conflicting_baseline.subtitle.lines[0].spans[0] = OcrSpan::Text {
+        conflicting_baseline.subtitle.blocks[0].lines[0].spans[0] = OcrSpan::Text {
             text: "物語".to_owned(),
             styles: vec![TextStyle::Superscript, TextStyle::Subscript],
             color: None,
@@ -1581,7 +1673,7 @@ mod tests {
         ));
 
         let mut duplicate_style = valid_edit();
-        duplicate_style.subtitle.lines[0].spans[0] = OcrSpan::Text {
+        duplicate_style.subtitle.blocks[0].lines[0].spans[0] = OcrSpan::Text {
             text: "物語".to_owned(),
             styles: vec![TextStyle::Italic, TextStyle::Italic],
             color: None,
@@ -1592,10 +1684,43 @@ mod tests {
         ));
 
         let mut invalid_color = valid_edit();
-        *invalid_color.subtitle.lines[0].spans[0].color_mut() = Some("tomato".to_owned());
+        *invalid_color.subtitle.blocks[0].lines[0].spans[0].color_mut() = Some("tomato".to_owned());
         assert!(matches!(
             validate_cue_edit(&invalid_color),
             Err(CueEditError::Invalid(message)) if message.contains("invalid text color")
+        ));
+    }
+
+    #[test]
+    fn names_the_block_only_once_a_cue_actually_has_blocks() {
+        let mut single = valid_edit();
+        single.subtitle.blocks[0].lines[0].text = "別の文字".to_owned();
+        assert!(matches!(
+            validate_cue_edit(&single),
+            Err(CueEditError::Invalid(message))
+                if message == "subtitle line 1 does not match its structured spans"
+        ));
+
+        let mut two = valid_edit();
+        two.subtitle.blocks.push(text_block(
+            SubtitlePosition::TopRight,
+            vec![ruby_line(), ruby_line()],
+        ));
+        two.subtitle.blocks[1].lines[1].text = "別の文字".to_owned();
+        assert!(matches!(
+            validate_cue_edit(&two),
+            Err(CueEditError::Invalid(message))
+                if message == "subtitle block 2 line 2 does not match its structured spans"
+        ));
+    }
+
+    #[test]
+    fn rejects_a_block_with_no_lines() {
+        let mut empty = valid_edit();
+        empty.subtitle.blocks[0].lines.clear();
+        assert!(matches!(
+            validate_cue_edit(&empty),
+            Err(CueEditError::Invalid(_))
         ));
     }
 

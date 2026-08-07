@@ -1298,6 +1298,7 @@ dependencies = [
  "rosettacue-diagnostics",
  "rosettacue-domain",
  "rosettacue-export",
+ "rosettacue-layout",
  "rosettacue-ocr",
  "rosettacue-pgs",
  "rosettacue-project",
@@ -1342,6 +1343,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rosettacue-layout"
+version = "0.1.0"
+dependencies = [
+ "png",
+ "rosettacue-domain",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
 name = "rosettacue-llm"
 version = "0.1.0"
 dependencies = [
@@ -1361,6 +1372,7 @@ dependencies = [
  "regex",
  "rosettacue-diagnostics",
  "rosettacue-domain",
+ "rosettacue-layout",
  "rosettacue-llm",
  "serde",
  "serde_json",

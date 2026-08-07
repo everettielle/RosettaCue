@@ -1,4 +1,4 @@
-use super::{LanguagePreset, normalize_text};
+use super::{BlockOrder, LanguagePreset, normalize_text};
 
 pub(super) const LATIN_MAIN_TEXT_INSTRUCTION: &str = r"Preserve Latin letters, capitalization, diacritics, punctuation, contractions, and spacing exactly as visible. Do not correct spelling or expand abbreviations. Keep language-native characters rather than replacing them with unaccented ASCII.";
 
@@ -9,6 +9,7 @@ pub(super) const PRESET: LanguagePreset = LanguagePreset::new(
     "English",
     LATIN_MAIN_TEXT_INSTRUCTION,
     LATIN_ANNOTATION_INSTRUCTION,
+    BlockOrder::LeftToRight,
     normalize_text,
     true,
 );
