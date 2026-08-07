@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 use rosettacue_core::{
     Application, ExportFormat, ExportOptions, ExportScope, LlmProvider, OcrPipelineConfig,
-    ProviderConfig, ReasoningEffort,
+    ProviderConfig, ProviderSpec, ReasoningEffort,
 };
 
 #[derive(Debug, Parser)]
@@ -86,9 +86,10 @@ impl From<CliReasoningEffort> for ReasoningEffort {
 
 /// Applies an explicit reasoning effort to the `OpenAI` profiles in a pipeline.
 ///
-/// Other providers reject the field, so they are skipped rather than failed —
-/// a pipeline may legitimately mix `OpenAI` with a local or Anthropic stage. The
-/// flag is only an error when it would reach nothing at all.
+/// Only the `OpenAI` variant carries the parameter, so other providers are
+/// skipped rather than failed — a pipeline may legitimately mix `OpenAI` with a
+/// local or Anthropic stage. The flag is only an error when it would reach
+/// nothing at all.
 fn apply_reasoning_effort(
     configs: &mut [&mut ProviderConfig],
     effort: Option<CliReasoningEffort>,
@@ -98,8 +99,8 @@ fn apply_reasoning_effort(
     };
     let mut applied = false;
     for config in configs {
-        if config.provider == LlmProvider::OpenAi {
-            config.reasoning_effort = Some(effort.into());
+        if let ProviderSpec::OpenAi { reasoning_effort } = &mut config.provider {
+            *reasoning_effort = effort.into();
             applied = true;
         }
     }
@@ -365,7 +366,6 @@ fn run_command(app: Application, command: Command) -> anyhow::Result<()> {
             overwrite,
         } => {
             let mut config = ProviderConfig {
-                provider: provider.into(),
                 base_url,
                 model,
                 api_key: read_api_key(api_key_env.as_deref())?,
@@ -453,7 +453,6 @@ fn run_ocr_pipeline(app: Application, args: OcrRunArgs) -> anyhow::Result<()> {
         overwrite,
     } = args;
     let mut recognition = ProviderConfig {
-        provider: provider.into(),
         base_url,
         model,
         api_key: read_api_key(api_key_env.as_deref())?,
@@ -474,7 +473,6 @@ fn run_ocr_pipeline(app: Application, args: OcrRunArgs) -> anyhow::Result<()> {
     };
     let validation_provider = validation_provider.unwrap_or(provider);
     let mut validation = ProviderConfig {
-        provider: validation_provider.into(),
         base_url: validation_base_url.unwrap_or_else(|| recognition.base_url.clone()),
         model: validation_model.unwrap_or_else(|| recognition.model.clone()),
         api_key: read_api_key(validation_api_key_env.as_deref())?
@@ -553,7 +551,6 @@ mod tests {
     #[test]
     fn same_provider_task_inherits_the_recognition_profile() {
         let recognition = ProviderConfig {
-            provider: LlmProvider::OpenAi,
             base_url: "https://gateway.example/v1".to_owned(),
             model: "vision-main".to_owned(),
             api_key: Some("session-key".to_owned()),
@@ -577,7 +574,6 @@ mod tests {
     #[test]
     fn different_provider_task_uses_its_own_defaults_and_credentials() {
         let recognition = ProviderConfig {
-            provider: LlmProvider::OpenAi,
             base_url: "https://api.openai.com/v1".to_owned(),
             model: "vision-main".to_owned(),
             api_key: Some("openai-session-key".to_owned()),

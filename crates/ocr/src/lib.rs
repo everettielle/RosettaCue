@@ -13,7 +13,9 @@ pub use lmstudio::{
 };
 pub use prompt::PROMPT_VERSION;
 use rosettacue_domain::OcrDocument;
-pub use rosettacue_llm::{LlmProvider, ProviderConfig, ProviderDiagnostic, ReasoningEffort};
+pub use rosettacue_llm::{
+    LlmProvider, ProviderConfig, ProviderDiagnostic, ProviderSpec, ReasoningEffort,
+};
 
 #[derive(Debug, Clone)]
 pub struct OcrRequest {

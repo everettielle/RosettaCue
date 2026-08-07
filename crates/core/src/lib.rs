@@ -15,7 +15,7 @@ pub use rosettacue_export::{
 use rosettacue_ocr::PROMPT_VERSION;
 pub use rosettacue_ocr::{
     LlmProvider, LmStudioConfig, LmStudioModel, OcrPipelineConfig, ProviderConfig,
-    ProviderDiagnostic, ReasoningEffort,
+    ProviderDiagnostic, ProviderSpec, ReasoningEffort,
 };
 use rosettacue_ocr::{OcrBackend, OcrRequest, ProviderOcrBackend};
 use rosettacue_project::{ProjectError, ProjectStore};

@@ -2,17 +2,21 @@ use reqwest::blocking::Client;
 use serde_json::{Value, json};
 
 use crate::http;
-use crate::{CompletionRequest, CompletionResponse, LlmError, LlmModel, ProviderConfig};
+use crate::{
+    CompletionRequest, CompletionResponse, LlmError, LlmModel, ProviderConfig, ReasoningEffort,
+};
 
 /// Selects the request shape for an OpenAI-compatible endpoint.
 ///
 /// The two dialects diverge because GPT-5 reasoning models reject the sampling
 /// parameters local servers rely on for determinism, and take the output cap
-/// as `max_completion_tokens` rather than `max_tokens`.
+/// as `max_completion_tokens` rather than `max_tokens`. The dialect carries the
+/// OpenAI-only parameters, so the shared builder never inspects
+/// provider-specific configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Dialect {
     /// `api.openai.com`.
-    OpenAi,
+    OpenAi { reasoning_effort: ReasoningEffort },
     /// LM Studio, Ollama, and other self-hosted OpenAI-compatible servers.
     LocalCompatible,
 }
@@ -86,11 +90,9 @@ fn build_payload(
         "stream": false
     });
     match dialect {
-        Dialect::OpenAi => {
+        Dialect::OpenAi { reasoning_effort } => {
             payload["max_completion_tokens"] = json!(config.max_tokens);
-            if let Some(effort) = config.reasoning_effort {
-                payload["reasoning_effort"] = json!(effort.as_str());
-            }
+            payload["reasoning_effort"] = json!(reasoning_effort.as_str());
         }
         Dialect::LocalCompatible => {
             payload["max_tokens"] = json!(config.max_tokens);
@@ -148,6 +150,12 @@ mod tests {
         }
     }
 
+    const fn openai_dialect() -> Dialect {
+        Dialect::OpenAi {
+            reasoning_effort: ReasoningEffort::None,
+        }
+    }
+
     #[test]
     fn local_dialect_preserves_sampling_parameters() {
         let schema = json!({ "type": "json_object" });
@@ -177,7 +185,7 @@ mod tests {
         let payload = build_payload(
             &config(LlmProvider::OpenAi),
             &vision_request(&schema),
-            Dialect::OpenAi,
+            openai_dialect(),
         );
 
         assert!(
@@ -196,10 +204,8 @@ mod tests {
 
     #[test]
     fn openai_dialect_forwards_a_configured_reasoning_effort() {
-        let mut config = config(LlmProvider::OpenAi);
-        config.reasoning_effort = Some(ReasoningEffort::Low);
         let payload = build_payload(
-            &config,
+            &config(LlmProvider::OpenAi),
             &CompletionRequest {
                 system: "system",
                 stable_context: None,
@@ -209,31 +215,12 @@ mod tests {
                 previous_response: None,
                 correction: None,
             },
-            Dialect::OpenAi,
+            Dialect::OpenAi {
+                reasoning_effort: ReasoningEffort::Low,
+            },
         );
 
         assert_eq!(payload["reasoning_effort"], "low");
-    }
-
-    #[test]
-    fn openai_dialect_omits_reasoning_effort_when_unset() {
-        let mut config = config(LlmProvider::OpenAi);
-        config.reasoning_effort = None;
-        let payload = build_payload(
-            &config,
-            &CompletionRequest {
-                system: "system",
-                stable_context: None,
-                user_text: "read",
-                image_png_base64: None,
-                response_format: None,
-                previous_response: None,
-                correction: None,
-            },
-            Dialect::OpenAi,
-        );
-
-        assert!(payload.get("reasoning_effort").is_none());
     }
 
     #[test]
@@ -249,7 +236,7 @@ mod tests {
                 previous_response: None,
                 correction: None,
             },
-            Dialect::OpenAi,
+            openai_dialect(),
         );
 
         assert_eq!(
@@ -276,7 +263,7 @@ mod tests {
                 previous_response: Some("{\"bad\":true}"),
                 correction: Some("fix it"),
             },
-            Dialect::OpenAi,
+            openai_dialect(),
         );
 
         assert_eq!(payload.pointer("/messages/0/role"), Some(&json!("system")));
