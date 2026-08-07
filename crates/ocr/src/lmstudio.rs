@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::languages::{self, LanguagePreset, NormalizationEvent};
-use crate::prompt::{self, PROMPT_VERSION, SYSTEM_PROMPT};
+use crate::prompt::{self, PROMPT_VERSION, SYSTEM_PROMPT, StagePrompt};
 use crate::row_detection::estimate_main_rows;
 use crate::{OcrBackend, OcrError, OcrRecognition, OcrRequest};
 
@@ -158,7 +158,7 @@ impl ProviderOcrBackend {
         client: &ProviderClient,
         image_url: &str,
         stage: &'static str,
-        user_text: &str,
+        prompt: &StagePrompt,
         schema: &Value,
         request: &OcrRequest,
         validate: impl Fn(&str) -> Result<T, OcrError>,
@@ -171,7 +171,8 @@ impl ProviderOcrBackend {
                 .map(|error| prompt::retry(stage, error));
             let response = match client.complete(&CompletionRequest {
                 system: SYSTEM_PROMPT,
-                user_text,
+                stable_context: Some(&prompt.stable),
+                user_text: &prompt.variable,
                 image_png_base64: Some(image_url),
                 response_format: Some(schema),
                 previous_response: previous.as_deref(),
@@ -186,6 +187,7 @@ impl ProviderOcrBackend {
                         attempt,
                         DiagnosticLevel::Error,
                         "provider_failed",
+                        None,
                         None,
                         Some(&error.to_string()),
                     );
@@ -202,6 +204,7 @@ impl ProviderOcrBackend {
                         DiagnosticLevel::Debug,
                         "succeeded",
                         Some(&response.content),
+                        Some(&response.usage),
                         None,
                     );
                     return Ok((value, response, attempt));
@@ -215,6 +218,7 @@ impl ProviderOcrBackend {
                         DiagnosticLevel::Warn,
                         "validation_failed",
                         Some(&response.content),
+                        Some(&response.usage),
                         Some(&error.to_string()),
                     );
                     validation_error = Some(error.to_string());
@@ -229,6 +233,7 @@ impl ProviderOcrBackend {
                         DiagnosticLevel::Error,
                         "validation_failed",
                         Some(&response.content),
+                        Some(&response.usage),
                         Some(&error.to_string()),
                     );
                     return Err(error);
@@ -420,6 +425,30 @@ impl OcrBackend for ProviderOcrBackend {
     }
 }
 
+/// Flattens a provider's usage object into the fields that drive cost.
+///
+/// Providers name these differently and omit whatever does not apply, so every
+/// field is optional. `cache_read_input_tokens` is how a prompt-cache hit is
+/// confirmed, and `reasoning_tokens` is how `OpenAI` reasoning spend — billed at
+/// the output rate — becomes visible.
+fn usage_summary(usage: &Value) -> Value {
+    let read = |pointers: &[&str]| -> Option<u64> {
+        pointers
+            .iter()
+            .find_map(|pointer| usage.pointer(pointer).and_then(Value::as_u64))
+    };
+    json!({
+        "input_tokens": read(&["/input_tokens", "/prompt_tokens"]),
+        "output_tokens": read(&["/output_tokens", "/completion_tokens"]),
+        "cache_read_input_tokens": read(&[
+            "/cache_read_input_tokens",
+            "/prompt_tokens_details/cached_tokens",
+        ]),
+        "cache_creation_input_tokens": read(&["/cache_creation_input_tokens"]),
+        "reasoning_tokens": read(&["/completion_tokens_details/reasoning_tokens"]),
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn emit_stage_event(
     request: &OcrRequest,
@@ -429,6 +458,7 @@ fn emit_stage_event(
     level: DiagnosticLevel,
     phase: &str,
     candidate_content: Option<&str>,
+    usage: Option<&Value>,
     error: Option<&str>,
 ) {
     if !rosettacue_diagnostics::enabled() {
@@ -449,6 +479,7 @@ fn emit_stage_event(
             "provider": client.config().provider.as_str(),
             "model": client.config().model,
             "candidate_content": candidate_content,
+            "usage": usage.map(usage_summary),
             "error": error
         }),
     });
@@ -967,5 +998,53 @@ mod tests {
             .expect("assembled line");
 
         assert_eq!(lines[0].spans[0].color(), Some("#FF0000"));
+    }
+
+    #[test]
+    fn usage_summary_reads_the_anthropic_field_names() {
+        let summary = usage_summary(&json!({
+            "input_tokens": 1200,
+            "output_tokens": 150,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 1100
+        }));
+
+        assert_eq!(summary["input_tokens"], 1200);
+        assert_eq!(summary["output_tokens"], 150);
+        assert_eq!(summary["cache_read_input_tokens"], 1100);
+        assert_eq!(summary["cache_creation_input_tokens"], 0);
+        assert_eq!(summary["reasoning_tokens"], Value::Null);
+    }
+
+    #[test]
+    fn usage_summary_reads_the_openai_field_names() {
+        let summary = usage_summary(&json!({
+            "prompt_tokens": 1380,
+            "completion_tokens": 190,
+            "total_tokens": 1570,
+            "prompt_tokens_details": { "cached_tokens": 1024 },
+            "completion_tokens_details": { "reasoning_tokens": 0 }
+        }));
+
+        assert_eq!(summary["input_tokens"], 1380);
+        assert_eq!(summary["output_tokens"], 190);
+        assert_eq!(summary["cache_read_input_tokens"], 1024);
+        assert_eq!(summary["reasoning_tokens"], 0);
+        assert_eq!(summary["cache_creation_input_tokens"], Value::Null);
+    }
+
+    #[test]
+    fn usage_summary_tolerates_a_provider_that_reports_nothing() {
+        let summary = usage_summary(&Value::Null);
+
+        for field in [
+            "input_tokens",
+            "output_tokens",
+            "cache_read_input_tokens",
+            "cache_creation_input_tokens",
+            "reasoning_tokens",
+        ] {
+            assert_eq!(summary[field], Value::Null, "{field} must stay absent");
+        }
     }
 }

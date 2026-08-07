@@ -38,6 +38,35 @@ impl LlmProvider {
     }
 }
 
+/// Reasoning depth for `OpenAI` reasoning models.
+///
+/// Reasoning tokens are billed at the output rate. OCR and translation are
+/// transcription tasks rather than deliberation, so profiles default to
+/// [`ReasoningEffort::None`]; leaving the parameter unset would let the
+/// server-side default (`medium`) multiply output cost with no accuracy gain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningEffort {
+    None,
+    Minimal,
+    Low,
+    Medium,
+    High,
+}
+
+impl ReasoningEffort {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Minimal => "minimal",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderConfig {
     #[serde(default = "default_provider")]
@@ -48,6 +77,9 @@ pub struct ProviderConfig {
     pub timeout_seconds: u64,
     pub max_tokens: u32,
     pub max_attempts: u32,
+    /// OpenAI-only. Omitted from the request when `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<ReasoningEffort>,
 }
 
 const fn default_provider() -> LlmProvider {
@@ -65,6 +97,8 @@ impl ProviderConfig {
             timeout_seconds: 120,
             max_tokens: 512,
             max_attempts: 2,
+            reasoning_effort: matches!(provider, LlmProvider::OpenAi)
+                .then_some(ReasoningEffort::None),
         }
     }
 
@@ -73,7 +107,7 @@ impl ProviderConfig {
     /// # Errors
     ///
     /// Returns an error for an invalid endpoint, missing model, missing remote-provider key,
-    /// or non-positive execution limits.
+    /// non-positive execution limits, or reasoning effort on a provider that does not accept it.
     pub fn validate(&self) -> Result<(), LlmError> {
         validate_base_url(&self.base_url)?;
         if self.model.trim().is_empty() {
@@ -91,6 +125,12 @@ impl ProviderConfig {
             return Err(LlmError::InvalidConfig(
                 "timeout, max tokens and max attempts must be positive".to_owned(),
             ));
+        }
+        if self.reasoning_effort.is_some() && !matches!(self.provider, LlmProvider::OpenAi) {
+            return Err(LlmError::InvalidConfig(format!(
+                "reasoning effort is supported by openai only, not {}",
+                self.provider.as_str()
+            )));
         }
         Ok(())
     }
@@ -126,6 +166,14 @@ pub struct ProviderDiagnostic {
 #[derive(Debug, Clone)]
 pub struct CompletionRequest<'a> {
     pub system: &'a str,
+    /// Instruction text that is byte-identical across every request of the same
+    /// stage, language, and schema.
+    ///
+    /// Providers that support explicit prompt caching place a cache breakpoint at
+    /// the end of this block, so callers must keep per-request values — row hints,
+    /// recognized lines, the image — in `user_text`. A single varying byte here
+    /// invalidates the cache for every later request.
+    pub stable_context: Option<&'a str>,
     pub user_text: &'a str,
     pub image_png_base64: Option<&'a str>,
     pub response_format: Option<&'a Value>,
@@ -226,6 +274,7 @@ pub fn list_models(
         timeout_seconds: 10,
         max_tokens: 1,
         max_attempts: 1,
+        reasoning_effort: None,
     };
     let client = Client::builder().timeout(Duration::from_secs(10)).build()?;
     providers::list_models(&client, &config)
@@ -284,5 +333,49 @@ mod tests {
         let mut local = ProviderConfig::for_provider(LlmProvider::Ollama);
         local.model = "gemma-test".to_owned();
         assert!(local.validate().is_ok());
+    }
+
+    #[test]
+    fn reasoning_effort_defaults_to_none_for_openai_and_is_unset_elsewhere() {
+        assert_eq!(
+            ProviderConfig::for_provider(LlmProvider::OpenAi).reasoning_effort,
+            Some(ReasoningEffort::None)
+        );
+        for provider in [
+            LlmProvider::LmStudio,
+            LlmProvider::Ollama,
+            LlmProvider::Anthropic,
+        ] {
+            assert_eq!(
+                ProviderConfig::for_provider(provider).reasoning_effort,
+                None,
+                "{} must not carry reasoning effort",
+                provider.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn reasoning_effort_is_rejected_for_non_openai_providers() {
+        let mut config = ProviderConfig::for_provider(LlmProvider::Anthropic);
+        config.model = "claude-test".to_owned();
+        config.api_key = Some("key".to_owned());
+        config.reasoning_effort = Some(ReasoningEffort::Low);
+        assert!(matches!(config.validate(), Err(LlmError::InvalidConfig(_))));
+    }
+
+    #[test]
+    fn stored_profiles_without_reasoning_effort_still_deserialize() {
+        let stored = serde_json::json!({
+            "provider": "open_ai",
+            "base_url": "https://api.openai.com/v1",
+            "model": "gpt-5.6-luna",
+            "api_key": null,
+            "timeout_seconds": 120,
+            "max_tokens": 512,
+            "max_attempts": 2
+        });
+        let config = serde_json::from_value::<ProviderConfig>(stored).expect("legacy profile");
+        assert_eq!(config.reasoning_effort, None);
     }
 }

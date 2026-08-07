@@ -93,6 +93,7 @@ impl SubtitleTranslator {
             return Err(TranslationError::EmptySource);
         }
         let started = Instant::now();
+        let stable_context = translation_context(request);
         let user_text = translation_prompt(request);
         let schema = translation_schema();
         let mut previous_response: Option<String> = None;
@@ -118,6 +119,7 @@ impl SubtitleTranslator {
             );
             let response = self.client.complete(&CompletionRequest {
                 system: SYSTEM_PROMPT,
+                stable_context: Some(&stable_context),
                 user_text: &user_text,
                 image_png_base64: None,
                 response_format: Some(&schema),
@@ -222,6 +224,22 @@ fn translation_event(
     });
 }
 
+/// Job-scoped translation context.
+///
+/// Identical for every Cue in one translation run — the language pair and the
+/// project's proper-noun glossary — so it forms the cacheable prefix. The
+/// glossary is the reason this matters: it is re-sent on every Cue and grows
+/// with the project.
+fn translation_context(request: &TranslationRequest<'_>) -> String {
+    json!({
+        "task": "translate_subtitle_cue",
+        "source_language": request.source_language,
+        "target_language": request.target_language,
+        "proper_noun_mappings": request.proper_nouns
+    })
+    .to_string()
+}
+
 fn translation_prompt(request: &TranslationRequest<'_>) -> String {
     let lines = request
         .document
@@ -232,12 +250,8 @@ fn translation_prompt(request: &TranslationRequest<'_>) -> String {
         .map(|(index, line)| json!({ "line_index": index + 1, "text": line.text }))
         .collect::<Vec<_>>();
     json!({
-        "task": "translate_subtitle_cue",
-        "source_language": request.source_language,
-        "target_language": request.target_language,
         "previous_cue_context": request.previous_context,
         "next_cue_context": request.next_context,
-        "proper_noun_mappings": request.proper_nouns,
         "lines": lines
     })
     .to_string()
@@ -450,7 +464,7 @@ mod tests {
     }
 
     #[test]
-    fn includes_project_proper_noun_mappings_in_the_prompt() {
+    fn includes_project_proper_noun_mappings_in_the_cached_context() {
         let mappings = vec![ProperNounMapping {
             source: "綾瀬千早".to_owned(),
             translation: "Chihaya Ayase".to_owned(),
@@ -463,11 +477,49 @@ mod tests {
             next_context: None,
             proper_nouns: &mappings,
         };
+        let context: Value = serde_json::from_str(&translation_context(&request)).expect("context");
         let prompt: Value = serde_json::from_str(&translation_prompt(&request)).expect("prompt");
 
         assert_eq!(
-            prompt["proper_noun_mappings"],
+            context["proper_noun_mappings"],
             json!([{"source":"綾瀬千早","translation":"Chihaya Ayase"}])
         );
+        assert_eq!(context["source_language"], "jpn");
+        assert_eq!(context["target_language"], "eng");
+        assert!(
+            prompt.get("proper_noun_mappings").is_none(),
+            "the glossary is job-scoped and belongs in the cached prefix"
+        );
+    }
+
+    #[test]
+    fn the_cached_context_is_stable_across_cues_in_one_job() {
+        let mappings = vec![ProperNounMapping {
+            source: "綾瀬千早".to_owned(),
+            translation: "Chihaya Ayase".to_owned(),
+        }];
+        let document = source();
+        let request = |previous, next| TranslationRequest {
+            document: &document,
+            source_language: "jpn",
+            target_language: "eng",
+            previous_context: previous,
+            next_context: next,
+            proper_nouns: &mappings,
+        };
+
+        // Neighbouring-cue context changes per Cue and must not disturb the prefix.
+        let first = request(None, Some("次の台詞"));
+        let second = request(Some("前の台詞"), None);
+        assert_eq!(
+            translation_context(&first),
+            translation_context(&second),
+            "the cached prefix must not move between Cues"
+        );
+        assert_ne!(translation_prompt(&first), translation_prompt(&second));
+
+        let prompt: Value = serde_json::from_str(&translation_prompt(&first)).expect("prompt");
+        assert_eq!(prompt["next_cue_context"], "次の台詞");
+        assert!(prompt["lines"].is_array());
     }
 }

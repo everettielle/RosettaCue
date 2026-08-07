@@ -8,7 +8,7 @@ pub(super) fn complete(
     config: &ProviderConfig,
     request: &CompletionRequest<'_>,
 ) -> Result<CompletionResponse, LlmError> {
-    openai_compatible::complete(client, config, request)
+    openai_compatible::complete(client, config, request, openai_compatible::Dialect::OpenAi)
 }
 
 pub(super) fn list_models(

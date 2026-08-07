@@ -45,12 +45,40 @@ fn authenticate(request: RequestBuilder, config: &ProviderConfig) -> RequestBuil
     }
 }
 
+const SCHEMA_INSTRUCTION: &str = "\nReturn only JSON matching this response format:\n";
+
 fn build_payload(config: &ProviderConfig, request: &CompletionRequest<'_>) -> Value {
-    let mut instruction = request.user_text.to_owned();
-    if let Some(schema) = request.response_format {
-        instruction.push_str("\nReturn only JSON matching this response format:\n");
-        instruction.push_str(&schema.to_string());
-    }
+    let schema_block = request
+        .response_format
+        .map(|schema| format!("{SCHEMA_INSTRUCTION}{schema}"));
+
+    // With a stable block the schema rides at the end of the cached prefix and the
+    // user turn carries only per-request content. Without one the schema stays
+    // appended to the instruction, which is the pre-caching contract.
+    let (system, instruction) = if let Some(stable) = request.stable_context {
+        let mut cached = stable.to_owned();
+        if let Some(schema) = &schema_block {
+            cached.push_str(schema);
+        }
+        (
+            json!([
+                { "type": "text", "text": request.system },
+                {
+                    "type": "text",
+                    "text": cached,
+                    "cache_control": { "type": "ephemeral" }
+                }
+            ]),
+            request.user_text.to_owned(),
+        )
+    } else {
+        let mut instruction = request.user_text.to_owned();
+        if let Some(schema) = &schema_block {
+            instruction.push_str(schema);
+        }
+        (json!(request.system), instruction)
+    };
+
     let mut user_content = vec![json!({ "type": "text", "text": instruction })];
     if let Some(image) = request.image_png_base64 {
         user_content.push(json!({
@@ -69,7 +97,7 @@ fn build_payload(config: &ProviderConfig, request: &CompletionRequest<'_>) -> Va
     }
     json!({
         "model": config.model,
-        "system": request.system,
+        "system": system,
         "messages": messages,
         "max_tokens": config.max_tokens,
         "stream": false
@@ -104,21 +132,24 @@ mod tests {
     use super::*;
     use crate::LlmProvider;
 
-    #[test]
-    fn messages_contract_omits_temperature() {
-        let config = ProviderConfig {
-            provider: LlmProvider::Anthropic,
-            base_url: "https://api.anthropic.test/v1".to_owned(),
+    fn config() -> ProviderConfig {
+        ProviderConfig {
             model: "claude-test".to_owned(),
             api_key: Some("anthropic-key".to_owned()),
             timeout_seconds: 5,
             max_tokens: 100,
             max_attempts: 1,
-        };
+            ..ProviderConfig::for_provider(LlmProvider::Anthropic)
+        }
+    }
+
+    #[test]
+    fn messages_contract_omits_temperature_and_keeps_the_legacy_shape() {
         let payload = build_payload(
-            &config,
+            &config(),
             &CompletionRequest {
                 system: "system",
+                stable_context: None,
                 user_text: "read",
                 image_png_base64: Some("cG5n"),
                 response_format: Some(&json!({ "type": "json_object" })),
@@ -126,16 +157,106 @@ mod tests {
                 correction: None,
             },
         );
+
         assert_eq!(payload["system"], "system");
         assert!(payload.get("temperature").is_none());
         assert_eq!(
             payload.pointer("/messages/0/content/1/source/data"),
             Some(&json!("cG5n"))
         );
+
+        let instruction = payload
+            .pointer("/messages/0/content/0/text")
+            .and_then(Value::as_str)
+            .expect("instruction text");
+        assert!(
+            instruction.contains("json_object"),
+            "without a stable block the schema stays on the user turn"
+        );
+    }
+
+    #[test]
+    fn a_stable_block_becomes_a_cached_system_prefix() {
+        let payload = build_payload(
+            &config(),
+            &CompletionRequest {
+                system: "system",
+                stable_context: Some("stage guidance"),
+                user_text: "row hint",
+                image_png_base64: Some("cG5n"),
+                response_format: Some(&json!({ "type": "json_object" })),
+                previous_response: None,
+                correction: None,
+            },
+        );
+
+        assert_eq!(payload.pointer("/system/0/text"), Some(&json!("system")));
+        assert!(
+            payload.pointer("/system/0/cache_control").is_none(),
+            "only the last stable block carries the breakpoint"
+        );
+        assert_eq!(
+            payload.pointer("/system/1/cache_control"),
+            Some(&json!({ "type": "ephemeral" }))
+        );
+
+        let cached = payload
+            .pointer("/system/1/text")
+            .and_then(Value::as_str)
+            .expect("cached block");
+        assert!(cached.starts_with("stage guidance"));
+        assert!(
+            cached.contains("json_object"),
+            "the schema is stable and belongs in the cached prefix"
+        );
+
+        let instruction = payload
+            .pointer("/messages/0/content/0/text")
+            .and_then(Value::as_str)
+            .expect("instruction text");
+        assert_eq!(
+            instruction, "row hint",
+            "the user turn must carry per-request content only"
+        );
+    }
+
+    #[test]
+    fn retry_turns_stay_behind_the_cached_prefix() {
+        let payload = build_payload(
+            &config(),
+            &CompletionRequest {
+                system: "system",
+                stable_context: Some("stage guidance"),
+                user_text: "row hint",
+                image_png_base64: None,
+                response_format: None,
+                previous_response: Some("{\"bad\":true}"),
+                correction: Some("fix it"),
+            },
+        );
+
+        assert_eq!(
+            payload.pointer("/system/1/text"),
+            Some(&json!("stage guidance"))
+        );
+        assert_eq!(payload.pointer("/messages/0/role"), Some(&json!("user")));
+        assert_eq!(
+            payload.pointer("/messages/1/role"),
+            Some(&json!("assistant"))
+        );
+        assert_eq!(
+            payload.pointer("/messages/2/content"),
+            Some(&json!("fix it"))
+        );
+    }
+
+    #[test]
+    fn completion_response_is_parsed_from_the_first_text_block() {
         let parsed = parse_completion_response(
             r#"{"model":"claude-test","content":[{"type":"text","text":"{\"ok\":true}"}],"usage":{"input_tokens":4}}"#,
         )
         .expect("Anthropic response");
+        assert_eq!(parsed.content, "{\"ok\":true}");
         assert_eq!(parsed.model.as_deref(), Some("claude-test"));
     }
 }
