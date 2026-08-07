@@ -287,6 +287,8 @@
   "workspace_action_failed": "Project action failed",
   "workspace_block": "Block {index}",
   "workspace_blocks": "Text blocks",
+  "workspace_block_move_earlier": "Move block earlier in reading order",
+  "workspace_block_move_later": "Move block later in reading order",
   "workspace_content": "Content",
   "workspace_cue": "Cue {index}",
   "workspace_cue_image_aria": "Original subtitle cue {index} at its Blu-ray canvas position",

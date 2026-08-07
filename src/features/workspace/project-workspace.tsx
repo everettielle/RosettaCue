@@ -764,6 +764,16 @@ export function ProjectWorkspace({
     })
   }
 
+  const moveCueBlock = (index: number, offset: number) => {
+    if (!cueDraft) return
+    const target = index + offset
+    if (target < 0 || target >= cueDraft.blocks.length) return
+    const blocks = [...cueDraft.blocks]
+    const [moved] = blocks.splice(index, 1)
+    blocks.splice(target, 0, moved)
+    updateCueDraft({ blocks })
+  }
+
   const cueText = React.useMemo(() => {
     const textByCue = new Map<string, string>()
     if (document) {
@@ -1423,6 +1433,7 @@ export function ProjectWorkspace({
                   saving={saving}
                   onDraftChange={updateCueDraft}
                   onBlockChange={updateCueBlock}
+                  onBlockMove={moveCueBlock}
                   onSave={() => void saveCue()}
                   ocrBusy={ocrState !== "idle"}
                   translationBusy={translationBusy}
@@ -1666,6 +1677,23 @@ function CueComparison({
                 height={imagePlacement.height}
                 preserveAspectRatio="none"
               />
+              {/* Only worth drawing once the analyzer actually split the cue:
+                  a single box around the whole bitmap says nothing. */}
+              {(sourceDocument?.blocks.length ?? 0) > 1 &&
+                sourceDocument?.blocks.map((block, blockIndex) => (
+                  <rect
+                    key={blockIndex}
+                    x={block.bounds.x}
+                    y={block.bounds.y}
+                    width={block.bounds.width}
+                    height={block.bounds.height}
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth={Math.max(1, canvasHeight / 400)}
+                    strokeDasharray={`${Math.max(4, canvasHeight / 120)}`}
+                    className="text-preview-muted"
+                  />
+                ))}
             </svg>
           ) : imageError ? (
             <p className="text-xs text-preview-muted">
@@ -1819,6 +1847,7 @@ function Inspector({
   saving,
   onDraftChange,
   onBlockChange,
+  onBlockMove,
   onSave,
   ocrBusy,
   translationBusy,
@@ -1842,6 +1871,7 @@ function Inspector({
   saving: boolean
   onDraftChange: (patch: Partial<CueEditDraft>) => void
   onBlockChange: (index: number, patch: Partial<TextBlock>) => void
+  onBlockMove: (index: number, offset: number) => void
   onSave: () => void
   ocrBusy: boolean
   translationBusy: boolean
@@ -2010,31 +2040,59 @@ function Inspector({
                       </Badge>
                     </div>
                     {blocks.length > 1 && (
-                      <div
-                        className="flex flex-wrap gap-1.5"
-                        role="tablist"
-                        aria-label={m.workspace_blocks()}
-                      >
-                        {blocks.map((block, index) => (
-                          <Button
-                            key={index}
-                            type="button"
-                            size="sm"
-                            role="tab"
-                            aria-selected={index === clampedBlockIndex}
-                            variant={
-                              index === clampedBlockIndex
-                                ? "secondary"
-                                : "ghost"
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <div
+                          className="flex flex-wrap gap-1.5"
+                          role="tablist"
+                          aria-label={m.workspace_blocks()}
+                        >
+                          {blocks.map((block, index) => (
+                            <Button
+                              key={index}
+                              type="button"
+                              size="sm"
+                              role="tab"
+                              aria-selected={index === clampedBlockIndex}
+                              variant={
+                                index === clampedBlockIndex
+                                  ? "secondary"
+                                  : "ghost"
+                              }
+                              onClick={() => selectBlock(index)}
+                            >
+                              {m.workspace_block({ index: index + 1 })}
+                              <span className="text-muted-foreground">
+                                {writingModeLabel(block.writing_mode)}
+                              </span>
+                            </Button>
+                          ))}
+                        </div>
+                        {/* Reading order is guessed from geometry, so a wrong
+                            guess has to be fixable. */}
+                        <div className="ml-auto flex items-center gap-1">
+                          <IconButton
+                            label={m.workspace_block_move_earlier()}
+                            icon={ChevronLeftIcon}
+                            size="icon-xs"
+                            disabled={saving || clampedBlockIndex === 0}
+                            onClick={() => {
+                              onBlockMove(clampedBlockIndex, -1)
+                              selectBlock(clampedBlockIndex - 1)
+                            }}
+                          />
+                          <IconButton
+                            label={m.workspace_block_move_later()}
+                            icon={ChevronRightIcon}
+                            size="icon-xs"
+                            disabled={
+                              saving || clampedBlockIndex === blocks.length - 1
                             }
-                            onClick={() => selectBlock(index)}
-                          >
-                            {m.workspace_block({ index: index + 1 })}
-                            <span className="text-muted-foreground">
-                              {writingModeLabel(block.writing_mode)}
-                            </span>
-                          </Button>
-                        ))}
+                            onClick={() => {
+                              onBlockMove(clampedBlockIndex, 1)
+                              selectBlock(clampedBlockIndex + 1)
+                            }}
+                          />
+                        </div>
                       </div>
                     )}
                     <SubtitleContentEditor
