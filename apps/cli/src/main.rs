@@ -81,6 +81,16 @@ enum OcrCommand {
         #[command(flatten)]
         provider: ProviderArgs,
     },
+    /// Analyzes every cue bitmap and reports the layout breakdown without
+    /// contacting a provider.
+    LayoutSurvey {
+        project: PathBuf,
+        #[arg(long, default_value = "jpn")]
+        language: String,
+        /// Write the full report here instead of printing it.
+        #[arg(long)]
+        json: Option<PathBuf>,
+    },
     Run(Box<OcrRunArgs>),
 }
 
@@ -309,6 +319,33 @@ fn run_ocr_command(app: Application, command: OcrCommand) -> anyhow::Result<()> 
                     api_key.as_deref(),
                 ))?
             );
+        }
+        OcrCommand::LayoutSurvey {
+            project,
+            language,
+            json,
+        } => {
+            let survey = app.survey_cue_layout(project, &language)?;
+            let report = serde_json::to_string_pretty(&survey)?;
+            if let Some(path) = json {
+                std::fs::write(&path, report)?;
+                eprintln!(
+                    "Analyzed {} cues: {} multi-block, {} vertical, {} mixed, {} degraded. Report written to {}.",
+                    survey.cue_count,
+                    survey
+                        .cues_by_block_count
+                        .iter()
+                        .filter(|(blocks, _)| **blocks > 1)
+                        .map(|(_, cues)| cues)
+                        .sum::<u32>(),
+                    survey.vertical_cues,
+                    survey.mixed_direction_cues,
+                    survey.degraded_cues,
+                    path.display()
+                );
+            } else {
+                println!("{report}");
+            }
         }
         OcrCommand::Run(args) => run_ocr_pipeline(app, *args)?,
     }

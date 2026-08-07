@@ -10,6 +10,7 @@ rosettacue-bluray = { path = "../bluray" }
 rosettacue-diagnostics = { path = "../diagnostics" }
 rosettacue-domain = { path = "../domain" }
 rosettacue-export = { path = "../export" }
+rosettacue-layout = { path = "../layout" }
 rosettacue-ocr = { path = "../ocr" }
 rosettacue-pgs = { path = "../pgs" }
 rosettacue-project = { path = "../project" }

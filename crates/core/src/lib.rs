@@ -1,6 +1,10 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
+mod layout_survey;
+
+use layout_survey::SurveyBuilder;
+pub use layout_survey::{CueLayoutBlock, CueLayoutSummary, LayoutSurvey, LayoutSurveyError};
 pub use rosettacue_bluray::configure_media_tools_directory;
 pub use rosettacue_bluray::{MediaToolDiagnostic, MediaToolOrigin};
 use rosettacue_domain::{
@@ -537,16 +541,34 @@ impl Application {
         image_path: impl AsRef<Path>,
     ) -> Result<Vec<u8>, CueImageError> {
         let store = ProjectStore::open(project_path)?;
-        let allowed_root = store.root().join("assets/cues").canonicalize()?;
-        let relative = image_path.as_ref();
-        if relative.is_absolute() {
-            return Err(CueImageError::OutsideProject);
+        Ok(std::fs::read(confined_cue_path(&store, image_path)?)?)
+    }
+
+    /// Analyzes every cue bitmap and reports how the project's layouts break down.
+    ///
+    /// No provider is contacted: this is the deterministic half of recognition,
+    /// run on its own to size up a track before paying to recognize it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the project cannot be opened or the language has
+    /// no preset. A cue whose bitmap cannot be read is counted and reported,
+    /// not raised.
+    pub fn survey_cue_layout(
+        self,
+        project_path: impl AsRef<Path>,
+        language: &str,
+    ) -> Result<LayoutSurvey, LayoutSurveyError> {
+        let store = ProjectStore::open(project_path)?;
+        let options = rosettacue_ocr::layout_options(language)?;
+        let mut builder = SurveyBuilder::default();
+        for cue in store.cues()? {
+            match read_cue_layout(&store, &cue, &options) {
+                Ok(layout) => builder.add(&cue, &layout),
+                Err(error) => builder.add_failure(&cue, &error),
+            }
         }
-        let candidate = store.root().join(relative).canonicalize()?;
-        if !candidate.starts_with(allowed_root) {
-            return Err(CueImageError::OutsideProject);
-        }
-        Ok(std::fs::read(candidate)?)
+        Ok(builder.finish())
     }
 
     /// Lists models currently visible to LM Studio's local server.
@@ -1142,18 +1164,41 @@ impl OcrProgress {
     }
 }
 
+/// Reads and analyzes one cue bitmap, keeping every per-cue failure local.
+fn read_cue_layout(
+    store: &ProjectStore,
+    cue: &SubtitleCue,
+    options: &rosettacue_ocr::LayoutOptions,
+) -> Result<rosettacue_ocr::CueLayout, Box<dyn std::error::Error>> {
+    let image = std::fs::read(confined_cue_path(store, &cue.image_path)?)?;
+    Ok(rosettacue_layout::analyze_png(&image, options)?)
+}
+
+/// Why a cue image could not be resolved to a path inside the project.
+#[derive(Debug, thiserror::Error)]
+pub enum ConfinedCuePathError {
+    #[error("cue image path is outside the project")]
+    OutsideProject,
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+}
+
+/// Resolves a stored cue image path, refusing anything outside the cue directory.
+///
+/// Every reader of a cue bitmap goes through here, so the confinement rule has
+/// one definition rather than one per caller.
 fn confined_cue_path(
     store: &ProjectStore,
-    image_path: &str,
-) -> Result<std::path::PathBuf, OcrJobError> {
+    image_path: impl AsRef<Path>,
+) -> Result<std::path::PathBuf, ConfinedCuePathError> {
     let allowed_root = store.root().join("assets/cues").canonicalize()?;
-    let relative = Path::new(image_path);
+    let relative = image_path.as_ref();
     if relative.is_absolute() {
-        return Err(OcrJobError::OutsideProject);
+        return Err(ConfinedCuePathError::OutsideProject);
     }
     let candidate = store.root().join(relative).canonicalize()?;
     if !candidate.starts_with(allowed_root) {
-        return Err(OcrJobError::OutsideProject);
+        return Err(ConfinedCuePathError::OutsideProject);
     }
     Ok(candidate)
 }
@@ -1438,8 +1483,8 @@ pub enum PgsExtractionError {
 
 #[derive(Debug, thiserror::Error)]
 pub enum CueImageError {
-    #[error("cue image path is outside the project")]
-    OutsideProject,
+    #[error(transparent)]
+    CuePath(#[from] ConfinedCuePathError),
     #[error(transparent)]
     Project(#[from] ProjectError),
     #[error(transparent)]
@@ -1482,8 +1527,8 @@ pub enum OcrJobError {
     CueNotFound,
     #[error("too many cues were selected")]
     TooManyCues,
-    #[error("cue image path is outside the project")]
-    OutsideProject,
+    #[error(transparent)]
+    CuePath(#[from] ConfinedCuePathError),
     #[error("persistent OCR job was not found")]
     PersistentJobNotFound,
     #[error("persistent OCR job is not resumable")]

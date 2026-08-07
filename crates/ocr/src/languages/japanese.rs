@@ -2,7 +2,7 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
-use super::{LanguagePreset, NormalizationEvent, apply, normalize_nfc};
+use super::{BlockOrder, LanguagePreset, NormalizationEvent, apply, normalize_nfc};
 
 static DOT_ELLIPSIS: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?:\.|．){3,}|…+").expect("valid centered ellipsis regex"));
@@ -16,6 +16,7 @@ pub(super) const PRESET: LanguagePreset = LanguagePreset::new(
     "Japanese",
     MAIN_TEXT_INSTRUCTION,
     ANNOTATION_INSTRUCTION,
+    BlockOrder::RightToLeft,
     normalize_japanese,
     false,
 );

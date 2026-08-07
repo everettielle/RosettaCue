@@ -13,9 +13,25 @@ pub use lmstudio::{
 };
 pub use prompt::PROMPT_VERSION;
 use rosettacue_domain::OcrDocument;
+pub use rosettacue_layout::{CueLayout, LayoutOptions};
 pub use rosettacue_llm::{
     LlmProvider, ProviderConfig, ProviderDiagnostic, ProviderSpec, ReasoningEffort,
 };
+
+/// The layout options a language implies.
+///
+/// Reading order is language policy, so it is resolved from the same preset
+/// table the prompts come from rather than being chosen at each call site.
+///
+/// # Errors
+///
+/// Returns an error when the language has no preset.
+pub fn layout_options(language: &str) -> Result<LayoutOptions, OcrError> {
+    Ok(LayoutOptions {
+        block_order: languages::resolve(language)?.block_order,
+        ..LayoutOptions::default()
+    })
+}
 
 #[derive(Debug, Clone)]
 pub struct OcrRequest {

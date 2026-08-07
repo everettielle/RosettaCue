@@ -6,6 +6,7 @@ mod japanese;
 mod korean;
 mod spanish;
 
+pub(crate) use rosettacue_layout::BlockOrder;
 use unicode_normalization::UnicodeNormalization;
 
 use crate::OcrError;
@@ -18,6 +19,9 @@ pub(crate) struct LanguagePreset {
     pub display_name: &'static str,
     pub main_text_instruction: &'static str,
     pub annotation_instruction: &'static str,
+    /// How blocks sitting side by side are read. Vertical Japanese goes right
+    /// to left; every other supported script goes left to right.
+    pub block_order: BlockOrder,
     normalize: Normalizer,
     reject_control_characters: bool,
 }
@@ -28,6 +32,7 @@ impl LanguagePreset {
         display_name: &'static str,
         main_text_instruction: &'static str,
         annotation_instruction: &'static str,
+        block_order: BlockOrder,
         normalize: Normalizer,
         reject_control_characters: bool,
     ) -> Self {
@@ -36,6 +41,7 @@ impl LanguagePreset {
             display_name,
             main_text_instruction,
             annotation_instruction,
+            block_order,
             normalize,
             reject_control_characters,
         }
