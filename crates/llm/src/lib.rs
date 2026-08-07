@@ -36,12 +36,149 @@ impl LlmProvider {
             Self::Anthropic => "https://api.anthropic.com/v1",
         }
     }
+
+    /// Whether the provider is a hosted API that requires an API key.
+    #[must_use]
+    pub const fn is_remote(self) -> bool {
+        matches!(self, Self::OpenAi | Self::Anthropic)
+    }
+}
+
+/// Reasoning depth for `OpenAI` reasoning models.
+///
+/// Reasoning tokens are billed at the output rate. OCR and translation are
+/// transcription tasks rather than deliberation, so profiles default to
+/// [`ReasoningEffort::None`]; leaving the parameter unset would let the
+/// server-side default (`medium`) multiply output cost with no accuracy gain.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningEffort {
+    #[default]
+    None,
+    Minimal,
+    Low,
+    Medium,
+    High,
+}
+
+impl ReasoningEffort {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Minimal => "minimal",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
+}
+
+/// Provider selection together with the parameters only that provider accepts.
+///
+/// A provider-specific parameter lives inside its provider's variant, so a
+/// configuration carrying another provider's parameter is unrepresentable and
+/// needs no cross-field validation. In profile JSON the selection stays flat
+/// while the parameters nest under a `provider_options` block:
+/// `{"provider": "open_ai", "provider_options": {"reasoning_effort": "none"}}`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "ProviderSpecWire", into = "ProviderSpecWire")]
+pub enum ProviderSpec {
+    LmStudio,
+    Ollama,
+    OpenAi { reasoning_effort: ReasoningEffort },
+    Anthropic,
+}
+
+/// Wire shape for [`ProviderSpec`]: the provider tag plus an optional
+/// `provider_options` block.
+///
+/// The conversion, rather than a derived tagged enum, defines how imperfect
+/// stored data resolves: a missing or null block falls back to the provider's
+/// defaults, and a stray block on a provider that takes no options is dropped
+/// rather than rejected.
+#[derive(Serialize, Deserialize)]
+struct ProviderSpecWire {
+    provider: LlmProvider,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    provider_options: Option<ProviderOptionsWire>,
+}
+
+/// Every provider-specific parameter as it appears inside `provider_options`.
+///
+/// Fields for all providers share this one wire struct; the conversion picks
+/// the ones belonging to the tagged provider and ignores the rest.
+#[derive(Default, Serialize, Deserialize)]
+struct ProviderOptionsWire {
+    #[serde(default)]
+    reasoning_effort: ReasoningEffort,
+}
+
+impl From<ProviderSpecWire> for ProviderSpec {
+    fn from(wire: ProviderSpecWire) -> Self {
+        match wire.provider {
+            LlmProvider::OpenAi => Self::OpenAi {
+                reasoning_effort: wire.provider_options.unwrap_or_default().reasoning_effort,
+            },
+            kind => Self::default_for(kind),
+        }
+    }
+}
+
+impl From<ProviderSpec> for ProviderSpecWire {
+    fn from(spec: ProviderSpec) -> Self {
+        Self {
+            provider: spec.kind(),
+            provider_options: match spec {
+                ProviderSpec::OpenAi { reasoning_effort } => {
+                    Some(ProviderOptionsWire { reasoning_effort })
+                }
+                ProviderSpec::LmStudio | ProviderSpec::Ollama | ProviderSpec::Anthropic => None,
+            },
+        }
+    }
+}
+
+impl ProviderSpec {
+    #[must_use]
+    pub const fn kind(self) -> LlmProvider {
+        match self {
+            Self::LmStudio => LlmProvider::LmStudio,
+            Self::Ollama => LlmProvider::Ollama,
+            Self::OpenAi { .. } => LlmProvider::OpenAi,
+            Self::Anthropic => LlmProvider::Anthropic,
+        }
+    }
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        self.kind().as_str()
+    }
+
+    /// Whether the provider is a hosted API that requires an API key.
+    #[must_use]
+    pub const fn is_remote(self) -> bool {
+        self.kind().is_remote()
+    }
+
+    /// The default spec for a provider kind.
+    #[must_use]
+    pub const fn default_for(kind: LlmProvider) -> Self {
+        match kind {
+            LlmProvider::LmStudio => Self::LmStudio,
+            LlmProvider::Ollama => Self::Ollama,
+            LlmProvider::OpenAi => Self::OpenAi {
+                reasoning_effort: ReasoningEffort::None,
+            },
+            LlmProvider::Anthropic => Self::Anthropic,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderConfig {
-    #[serde(default = "default_provider")]
-    pub provider: LlmProvider,
+    #[serde(flatten)]
+    pub provider: ProviderSpec,
     pub base_url: String,
     pub model: String,
     pub api_key: Option<String>,
@@ -50,15 +187,11 @@ pub struct ProviderConfig {
     pub max_attempts: u32,
 }
 
-const fn default_provider() -> LlmProvider {
-    LlmProvider::LmStudio
-}
-
 impl ProviderConfig {
     #[must_use]
     pub fn for_provider(provider: LlmProvider) -> Self {
         Self {
-            provider,
+            provider: ProviderSpec::default_for(provider),
             base_url: provider.default_base_url().to_owned(),
             model: String::new(),
             api_key: None,
@@ -79,9 +212,7 @@ impl ProviderConfig {
         if self.model.trim().is_empty() {
             return Err(LlmError::InvalidConfig("model is required".to_owned()));
         }
-        if matches!(self.provider, LlmProvider::OpenAi | LlmProvider::Anthropic)
-            && self.api_key.as_deref().is_none_or(str::is_empty)
-        {
+        if self.provider.is_remote() && self.api_key.as_deref().is_none_or(str::is_empty) {
             return Err(LlmError::InvalidConfig(format!(
                 "{} requires an API key",
                 self.provider.as_str()
@@ -126,6 +257,14 @@ pub struct ProviderDiagnostic {
 #[derive(Debug, Clone)]
 pub struct CompletionRequest<'a> {
     pub system: &'a str,
+    /// Instruction text that is byte-identical across every request of the same
+    /// stage, language, and schema.
+    ///
+    /// Providers that support explicit prompt caching place a cache breakpoint at
+    /// the end of this block, so callers must keep per-request values — row hints,
+    /// recognized lines, the image — in `user_text`. A single varying byte here
+    /// invalidates the cache for every later request.
+    pub stable_context: Option<&'a str>,
     pub user_text: &'a str,
     pub image_png_base64: Option<&'a str>,
     pub response_format: Option<&'a Value>,
@@ -207,9 +346,7 @@ pub fn list_models(
     api_key: Option<&str>,
 ) -> Result<Vec<LlmModel>, LlmError> {
     validate_base_url(base_url)?;
-    if matches!(provider, LlmProvider::OpenAi | LlmProvider::Anthropic)
-        && api_key.is_none_or(str::is_empty)
-    {
+    if provider.is_remote() && api_key.is_none_or(str::is_empty) {
         return Err(LlmError::InvalidConfig(format!(
             "{} requires an API key",
             provider.as_str()
@@ -219,7 +356,7 @@ pub fn list_models(
         rosettacue_diagnostics::register_secret(api_key);
     }
     let config = ProviderConfig {
-        provider,
+        provider: ProviderSpec::default_for(provider),
         base_url: base_url.to_owned(),
         model: "diagnostic".to_owned(),
         api_key: api_key.map(str::to_owned),
@@ -284,5 +421,93 @@ mod tests {
         let mut local = ProviderConfig::for_provider(LlmProvider::Ollama);
         local.model = "gemma-test".to_owned();
         assert!(local.validate().is_ok());
+    }
+
+    #[test]
+    fn default_spec_carries_reasoning_effort_for_openai_only() {
+        assert_eq!(
+            ProviderConfig::for_provider(LlmProvider::OpenAi).provider,
+            ProviderSpec::OpenAi {
+                reasoning_effort: ReasoningEffort::None
+            }
+        );
+        assert_eq!(
+            ProviderConfig::for_provider(LlmProvider::Anthropic).provider,
+            ProviderSpec::Anthropic
+        );
+    }
+
+    #[test]
+    fn provider_options_nest_under_their_own_block_in_profile_json() {
+        let openai = serde_json::to_value(ProviderConfig::for_provider(LlmProvider::OpenAi))
+            .expect("openai profile");
+        assert_eq!(openai["provider"], "open_ai");
+        assert_eq!(openai["provider_options"]["reasoning_effort"], "none");
+        assert_eq!(openai["base_url"], "https://api.openai.com/v1");
+        assert!(
+            openai.get("reasoning_effort").is_none(),
+            "provider-specific parameters must not leak into the common namespace"
+        );
+
+        let anthropic = serde_json::to_value(ProviderConfig::for_provider(LlmProvider::Anthropic))
+            .expect("anthropic profile");
+        assert_eq!(anthropic["provider"], "anthropic");
+        assert!(anthropic.get("provider_options").is_none());
+    }
+
+    #[test]
+    fn profiles_round_trip_through_json_for_every_provider() {
+        for provider in [
+            LlmProvider::LmStudio,
+            LlmProvider::Ollama,
+            LlmProvider::OpenAi,
+            LlmProvider::Anthropic,
+        ] {
+            let config = ProviderConfig::for_provider(provider);
+            let json = serde_json::to_value(&config).expect("serialize");
+            let parsed = serde_json::from_value::<ProviderConfig>(json).expect("deserialize");
+            assert_eq!(parsed.provider, config.provider);
+        }
+    }
+
+    #[test]
+    fn an_openai_profile_without_a_provider_options_block_defaults_to_none() {
+        for provider_options in [None, Some(serde_json::Value::Null)] {
+            let mut stored = serde_json::json!({
+                "provider": "open_ai",
+                "base_url": "https://api.openai.com/v1",
+                "model": "gpt-5.6-luna",
+                "api_key": null,
+                "timeout_seconds": 120,
+                "max_tokens": 512,
+                "max_attempts": 2
+            });
+            if let Some(null_block) = provider_options {
+                stored["provider_options"] = null_block;
+            }
+            let config = serde_json::from_value::<ProviderConfig>(stored).expect("stored profile");
+            assert_eq!(
+                config.provider,
+                ProviderSpec::OpenAi {
+                    reasoning_effort: ReasoningEffort::None
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn a_stray_provider_options_block_on_another_provider_is_dropped() {
+        let stored = serde_json::json!({
+            "provider": "anthropic",
+            "base_url": "https://api.anthropic.com/v1",
+            "model": "claude-test",
+            "api_key": null,
+            "timeout_seconds": 120,
+            "max_tokens": 512,
+            "max_attempts": 2,
+            "provider_options": { "reasoning_effort": "low" }
+        });
+        let config = serde_json::from_value::<ProviderConfig>(stored).expect("stored profile");
+        assert_eq!(config.provider, ProviderSpec::Anthropic);
     }
 }

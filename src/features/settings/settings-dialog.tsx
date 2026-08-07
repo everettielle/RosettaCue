@@ -51,7 +51,10 @@ import type {
   LlmProvider,
   MediaToolDiagnostic,
   ProjectSettings,
+  ProviderCommon,
+  ProviderConfig,
   ProviderDiagnostic,
+  ReasoningEffort,
 } from "@/features/projects/types"
 import {
   providerDefaults,
@@ -81,6 +84,14 @@ const providers: Array<{ value: LlmProvider; label: string }> = [
   { value: "ollama", label: "Ollama" },
   { value: "open_ai", label: "OpenAI API" },
   { value: "anthropic", label: "Anthropic API" },
+]
+
+const reasoningEfforts: Array<{ value: ReasoningEffort; label: string }> = [
+  { value: "none", label: "none" },
+  { value: "minimal", label: "minimal" },
+  { value: "low", label: "low" },
+  { value: "medium", label: "medium" },
+  { value: "high", label: "high" },
 ]
 
 const tasks: Array<{ value: ModelTask; label: string }> = [
@@ -279,7 +290,7 @@ export function SettingsDialog({
     }
   }
 
-  const updateProfile = (patch: Partial<typeof profile>) => {
+  const updateProfile = (patch: Partial<ProviderCommon>) => {
     setDraft((current) => ({
       ...current,
       profiles: {
@@ -290,13 +301,22 @@ export function SettingsDialog({
     setDiagnostic(null)
   }
 
+  // Provider-specific fields exist only on their provider's branch, so they
+  // are changed by replacing the whole profile rather than patching it.
+  const replaceProfile = (next: ProviderConfig) => {
+    setDraft((current) => ({
+      ...current,
+      profiles: { ...current.profiles, [activeTask]: next },
+    }))
+    setDiagnostic(null)
+  }
+
   const changeProvider = (provider: LlmProvider) => {
-    const defaults = providerDefaults(provider)
-    updateProfile({
-      provider,
-      base_url: defaults.base_url,
-      model: "",
-      api_key: null,
+    replaceProfile({
+      ...providerDefaults(provider),
+      timeout_seconds: profile.timeout_seconds,
+      max_tokens: profile.max_tokens,
+      max_attempts: profile.max_attempts,
     })
     setModels((current) => ({ ...current, [activeTask]: [] }))
   }
@@ -789,6 +809,47 @@ export function SettingsDialog({
                       {m.settings_model_description()}
                     </FieldDescription>
                   </Field>
+                  {profile.provider === "open_ai" && (
+                    <Field>
+                      <FieldLabel htmlFor={`reasoning-effort-${activeTask}`}>
+                        {m.settings_reasoning_effort()}
+                      </FieldLabel>
+                      <Select
+                        items={reasoningEfforts}
+                        value={profile.provider_options.reasoning_effort}
+                        onValueChange={(value) =>
+                          replaceProfile({
+                            ...profile,
+                            provider_options: {
+                              reasoning_effort: value as ReasoningEffort,
+                            },
+                          })
+                        }
+                      >
+                        <SelectTrigger
+                          id={`reasoning-effort-${activeTask}`}
+                          className="w-full"
+                        >
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectGroup>
+                            {reasoningEfforts.map((effort) => (
+                              <SelectItem
+                                key={effort.value}
+                                value={effort.value}
+                              >
+                                {effort.label}
+                              </SelectItem>
+                            ))}
+                          </SelectGroup>
+                        </SelectContent>
+                      </Select>
+                      <FieldDescription>
+                        {m.settings_reasoning_effort_description()}
+                      </FieldDescription>
+                    </Field>
+                  )}
                 </FieldGroup>
                 <div className="flex items-center gap-3">
                   <Button

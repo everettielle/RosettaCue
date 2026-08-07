@@ -1,10 +1,9 @@
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
-use rosettacue_core::{
-    Application, ExportFormat, ExportOptions, ExportScope, LlmProvider, OcrPipelineConfig,
-    ProviderConfig,
-};
+use rosettacue_core::{Application, ExportFormat, ExportOptions, ExportScope, LlmProvider};
+
+mod model_config;
 
 #[derive(Debug, Parser)]
 #[command(name = "rosettacue", version, about = "RosettaCue")]
@@ -33,14 +32,10 @@ enum Command {
         project: PathBuf,
         #[arg(long)]
         target_language: String,
-        #[arg(long, value_enum, default_value_t = CliProvider::LmStudio)]
-        provider: CliProvider,
+        /// Path to a model profile JSON document, or the document itself when
+        /// the value starts with '{'.
         #[arg(long)]
-        model: String,
-        #[arg(long, default_value = "http://127.0.0.1:1234/v1")]
-        base_url: String,
-        #[arg(long)]
-        api_key_env: Option<String>,
+        config: String,
         #[arg(long)]
         cue_id: Vec<uuid::Uuid>,
         #[arg(long)]
@@ -92,32 +87,11 @@ enum OcrCommand {
 #[derive(Debug, clap::Args)]
 struct OcrRunArgs {
     project: PathBuf,
-    #[arg(long, value_enum, default_value_t = CliProvider::LmStudio)]
-    provider: CliProvider,
+    /// Path to a model config JSON document describing the recognition,
+    /// optional ruby, and validation profiles — or the document itself when
+    /// the value starts with '{'.
     #[arg(long)]
-    model: String,
-    #[arg(long, default_value = "http://127.0.0.1:1234/v1")]
-    base_url: String,
-    #[arg(long)]
-    api_key_env: Option<String>,
-    #[arg(long)]
-    separate_ruby: bool,
-    #[arg(long, value_enum, requires = "separate_ruby")]
-    ruby_provider: Option<CliProvider>,
-    #[arg(long, requires = "separate_ruby")]
-    ruby_model: Option<String>,
-    #[arg(long, requires = "separate_ruby")]
-    ruby_base_url: Option<String>,
-    #[arg(long, requires = "separate_ruby")]
-    ruby_api_key_env: Option<String>,
-    #[arg(long, value_enum)]
-    validation_provider: Option<CliProvider>,
-    #[arg(long)]
-    validation_model: Option<String>,
-    #[arg(long)]
-    validation_base_url: Option<String>,
-    #[arg(long)]
-    validation_api_key_env: Option<String>,
+    config: String,
     #[arg(long, default_value = "jpn")]
     language: String,
     #[arg(long)]
@@ -142,32 +116,6 @@ enum CliProvider {
     Ollama,
     OpenAi,
     Anthropic,
-}
-
-fn task_provider_config(
-    provider: CliProvider,
-    inherited_provider: CliProvider,
-    base_url: Option<String>,
-    model: Option<String>,
-    api_key: Option<String>,
-    inherited: &ProviderConfig,
-) -> ProviderConfig {
-    let mut config = ProviderConfig::for_provider(provider.into());
-    if provider == inherited_provider {
-        config.base_url.clone_from(&inherited.base_url);
-        config.model.clone_from(&inherited.model);
-        config.api_key.clone_from(&inherited.api_key);
-    }
-    if let Some(base_url) = base_url {
-        config.base_url = base_url;
-    }
-    if let Some(model) = model {
-        config.model = model;
-    }
-    if api_key.is_some() {
-        config.api_key = api_key;
-    }
-    config
 }
 
 impl From<CliProvider> for LlmProvider {
@@ -303,20 +251,11 @@ fn run_command(app: Application, command: Command) -> anyhow::Result<()> {
         Command::Translate {
             project,
             target_language,
-            provider,
-            model,
-            base_url,
-            api_key_env,
+            config,
             cue_id,
             overwrite,
         } => {
-            let config = ProviderConfig {
-                provider: provider.into(),
-                base_url,
-                model,
-                api_key: read_api_key(api_key_env.as_deref())?,
-                ..ProviderConfig::for_provider(provider.into())
-            };
+            let config = model_config::load_profile(&config)?;
             let result = app.translate_cues(
                 project,
                 (!cue_id.is_empty()).then_some(cue_id),
@@ -371,78 +310,37 @@ fn run_ocr_command(app: Application, command: OcrCommand) -> anyhow::Result<()> 
                 ))?
             );
         }
-        OcrCommand::Run(args) => {
-            let OcrRunArgs {
-                project,
-                provider,
-                model,
-                base_url,
-                api_key_env,
-                separate_ruby,
-                ruby_provider,
-                ruby_model,
-                ruby_base_url,
-                ruby_api_key_env,
-                validation_provider,
-                validation_model,
-                validation_base_url,
-                validation_api_key_env,
-                language,
-                cue_id,
-                overwrite,
-            } = *args;
-            let recognition = ProviderConfig {
-                provider: provider.into(),
-                base_url,
-                model,
-                api_key: read_api_key(api_key_env.as_deref())?,
-                ..ProviderConfig::for_provider(provider.into())
-            };
-            let ruby = if separate_ruby {
-                let ruby_provider = ruby_provider.unwrap_or(provider);
-                Some(task_provider_config(
-                    ruby_provider,
-                    provider,
-                    ruby_base_url,
-                    ruby_model,
-                    read_api_key(ruby_api_key_env.as_deref())?,
-                    &recognition,
-                ))
-            } else {
-                None
-            };
-            let validation_provider = validation_provider.unwrap_or(provider);
-            let validation = ProviderConfig {
-                provider: validation_provider.into(),
-                base_url: validation_base_url.unwrap_or_else(|| recognition.base_url.clone()),
-                model: validation_model.unwrap_or_else(|| recognition.model.clone()),
-                api_key: read_api_key(validation_api_key_env.as_deref())?
-                    .or_else(|| recognition.api_key.clone()),
-                ..ProviderConfig::for_provider(validation_provider.into())
-            };
-            let selected = (!cue_id.is_empty()).then_some(cue_id);
-            let result = app.recognize_ocr(
-                project,
-                selected,
-                &language,
-                overwrite,
-                &OcrPipelineConfig {
-                    recognition,
-                    ruby,
-                    validation,
-                },
-                || true,
-                |progress| {
-                    eprint!(
-                        "\rOCR {}/{} ({})",
-                        progress.current, progress.total, progress.phase
-                    );
-                },
-            )?;
-            eprintln!();
-            println!("{}", serde_json::to_string_pretty(&result)?);
-        }
+        OcrCommand::Run(args) => run_ocr_pipeline(app, *args)?,
     }
+    Ok(())
+}
+
+fn run_ocr_pipeline(app: Application, args: OcrRunArgs) -> anyhow::Result<()> {
+    let OcrRunArgs {
+        project,
+        config,
+        language,
+        cue_id,
+        overwrite,
+    } = args;
+    let pipeline = model_config::load_pipeline(&config)?;
+    let selected = (!cue_id.is_empty()).then_some(cue_id);
+    let result = app.recognize_ocr(
+        project,
+        selected,
+        &language,
+        overwrite,
+        &pipeline,
+        || true,
+        |progress| {
+            eprint!(
+                "\rOCR {}/{} ({})",
+                progress.current, progress.total, progress.phase
+            );
+        },
+    )?;
+    eprintln!();
+    println!("{}", serde_json::to_string_pretty(&result)?);
     Ok(())
 }
 
@@ -480,58 +378,4 @@ fn run_export_command(
     )?;
     println!("{}", serde_json::to_string_pretty(&result)?);
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn same_provider_task_inherits_the_recognition_profile() {
-        let recognition = ProviderConfig {
-            provider: LlmProvider::OpenAi,
-            base_url: "https://gateway.example/v1".to_owned(),
-            model: "vision-main".to_owned(),
-            api_key: Some("session-key".to_owned()),
-            ..ProviderConfig::for_provider(LlmProvider::OpenAi)
-        };
-
-        let config = task_provider_config(
-            CliProvider::OpenAi,
-            CliProvider::OpenAi,
-            None,
-            None,
-            None,
-            &recognition,
-        );
-
-        assert_eq!(config.base_url, recognition.base_url);
-        assert_eq!(config.model, recognition.model);
-        assert_eq!(config.api_key, recognition.api_key);
-    }
-
-    #[test]
-    fn different_provider_task_uses_its_own_defaults_and_credentials() {
-        let recognition = ProviderConfig {
-            provider: LlmProvider::OpenAi,
-            base_url: "https://api.openai.com/v1".to_owned(),
-            model: "vision-main".to_owned(),
-            api_key: Some("openai-session-key".to_owned()),
-            ..ProviderConfig::for_provider(LlmProvider::OpenAi)
-        };
-
-        let config = task_provider_config(
-            CliProvider::Anthropic,
-            CliProvider::OpenAi,
-            None,
-            Some("claude-vision".to_owned()),
-            Some("anthropic-session-key".to_owned()),
-            &recognition,
-        );
-
-        assert_eq!(config.base_url, LlmProvider::Anthropic.default_base_url());
-        assert_eq!(config.model, "claude-vision");
-        assert_eq!(config.api_key.as_deref(), Some("anthropic-session-key"));
-        assert_ne!(config.api_key, recognition.api_key);
-    }
 }

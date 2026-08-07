@@ -1,7 +1,15 @@
-import type { LlmProvider, ProviderConfig } from "@/features/projects/types"
+import type {
+  LlmProvider,
+  ProviderCommon,
+  ProviderConfig,
+  ProviderSpec,
+  ReasoningEffort,
+} from "@/features/projects/types"
 import * as m from "@/paraglide/messages.js"
 
-const STORAGE_KEY = "rosettacue.workspace-settings.v1"
+// v3: provider-specific parameters moved under provider_options; earlier
+// shapes are ignored.
+const STORAGE_KEY = "rosettacue.workspace-settings.v3"
 
 export type ModelTask = "ocr" | "ruby" | "validation" | "translation"
 
@@ -10,7 +18,16 @@ export type WorkspaceSettings = {
   profiles: Record<ModelTask, ProviderConfig>
 }
 
-export function providerDefaults(provider: LlmProvider): ProviderConfig {
+const COMMON_KEYS = [
+  "base_url",
+  "model",
+  "api_key",
+  "timeout_seconds",
+  "max_tokens",
+  "max_attempts",
+] as const satisfies ReadonlyArray<keyof ProviderCommon>
+
+function commonDefaults(provider: LlmProvider): ProviderCommon {
   const baseUrls: Record<LlmProvider, string> = {
     lm_studio: "http://127.0.0.1:1234/v1",
     ollama: "http://127.0.0.1:11434/v1",
@@ -19,7 +36,6 @@ export function providerDefaults(provider: LlmProvider): ProviderConfig {
   }
 
   return {
-    provider,
     base_url: baseUrls[provider],
     model: "",
     api_key: null,
@@ -27,6 +43,28 @@ export function providerDefaults(provider: LlmProvider): ProviderConfig {
     max_tokens: 512,
     max_attempts: 2,
   }
+}
+
+/** The only place that resolves stored provider-specific values. */
+function normalizeSpec(
+  provider: LlmProvider,
+  storedEffort: ReasoningEffort | null | undefined
+): ProviderSpec {
+  switch (provider) {
+    case "open_ai":
+      return {
+        provider,
+        provider_options: { reasoning_effort: storedEffort ?? "none" },
+      }
+    case "lm_studio":
+    case "ollama":
+    case "anthropic":
+      return { provider }
+  }
+}
+
+export function providerDefaults(provider: LlmProvider): ProviderConfig {
+  return { ...commonDefaults(provider), ...normalizeSpec(provider, undefined) }
 }
 
 export const defaultWorkspaceSettings: WorkspaceSettings = {
@@ -42,17 +80,35 @@ export const defaultWorkspaceSettings: WorkspaceSettings = {
   },
 }
 
+function pickCommon(
+  value: Partial<ProviderCommon> | undefined
+): Partial<ProviderCommon> {
+  const picked: Partial<ProviderCommon> = {}
+  if (!value) return picked
+  const copy = <K extends keyof ProviderCommon>(key: K) => {
+    if (value[key] !== undefined) picked[key] = value[key]
+  }
+  COMMON_KEYS.forEach(copy)
+  return picked
+}
+
 function mergeProfile(
   value: Partial<ProviderConfig> | undefined,
   fallback: ProviderConfig
 ): ProviderConfig {
   const provider = value?.provider ?? fallback.provider
+  const storedEffort =
+    value && "provider_options" in value
+      ? value.provider_options?.reasoning_effort
+      : undefined
+  // Common fields are picked by name so that stored data cannot smuggle
+  // another provider's parameters past the spec normalization.
   return {
-    ...providerDefaults(provider),
-    ...fallback,
-    ...value,
-    provider,
+    ...commonDefaults(provider),
+    ...pickCommon(fallback),
+    ...pickCommon(value),
     api_key: null,
+    ...normalizeSpec(provider, storedEffort),
   }
 }
 

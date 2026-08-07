@@ -1034,7 +1034,11 @@ Settings uses a left-section layout:
 - **Models:** independent Text OCR, optional separate Ruby, Style, and post-OCR Translation profiles. A switch selects the two-request combined pipeline or the three-request separated pipeline and shows the corresponding phase numbers and cost/latency note.
 - **Advanced:** application-wide debug logging and the independent Debug Log window.
 
-Supported providers are LM Studio, Ollama, OpenAI API, and Anthropic API. A profile contains provider, base URL, model, optional session API key, timeout, token limit, and attempt count. API keys remain only in renderer memory and are redacted from local preferences and project records.
+Supported providers are LM Studio, Ollama, OpenAI API, and Anthropic API. A profile contains the common fields — base URL, model, optional session API key, timeout, token limit, attempt count — plus a provider spec: the provider selection together with the parameters only that provider accepts, currently reasoning effort on OpenAI. A parameter lives on its provider's branch of the spec, so a profile carrying another provider's parameter is unrepresentable rather than validated away. In profile JSON the common fields stay flat and the provider-specific parameters nest under a `provider_options` block; the CLI accepts the same document shape through `--config`, with `api_key_env` naming an environment variable in place of a literal key, since a config document lives on disk. API keys remain only in renderer memory and are redacted from local preferences and project records.
+
+OpenAI reasoning models take the output cap as `max_completion_tokens` and reject the sampling parameters local OpenAI-compatible servers rely on for determinism, so the two dialects build different request bodies. Reasoning tokens are billed at the output rate and the server-side default is not `none`, so every OpenAI profile defaults to `reasoning_effort: none`: recognition, style, and translation are transcription tasks that gain no accuracy from deliberation.
+
+Recognition, ruby, style, and translation prompts are each split into a stable half — task and language guidance plus the response schema, byte-identical for every Cue at that stage — and a per-Cue half carrying the deterministic row estimate or the already-recognized main lines. Anthropic requests place a cache breakpoint at the end of the stable half; OpenAI requests fold it into the system turn so automatic prefix caching can match it. Providers that do not cache are unaffected, because the two halves are concatenated in order.
 
 ### 10.7 Theme and component system
 
@@ -1117,7 +1121,7 @@ Cue image reads resolve project-relative paths and reject traversal outside the 
 ```mermaid
 classDiagram
   class ProviderConfig {
-    provider LlmProvider
+    provider ProviderSpec
     base_url string
     model string
     api_key Option~string~
@@ -1127,19 +1131,27 @@ classDiagram
     +validate()
     +redacted()
   }
-  class LlmProvider {
+  class ProviderSpec {
     <<enumeration>>
     lm_studio
     ollama
-    open_ai
+    open_ai reasoning_effort
     anthropic
+  }
+  class ReasoningEffort {
+    <<enumeration>>
+    none
+    minimal
+    low
+    medium
+    high
   }
   class ProviderClient {
     +models()
     +diagnose()
     +complete()
   }
-  ProviderConfig --> LlmProvider
+  ProviderConfig --> ProviderSpec
   ProviderClient --> ProviderConfig
 ```
 

@@ -98,6 +98,29 @@ same vision model as Text OCR or a dedicated model tuned for small annotations.
 Translation runs afterward on text. API keys live in renderer memory for the session only;
 they are never written to the project package, preferences, logs, or exports.
 
+### Remote model cost
+
+Cue images are tightly cropped to the glyph bounding box, not full frames, so a
+typical cue costs a few hundred image tokens rather than a few thousand. Across
+a two-hour film the recurring instruction text — stage guidance plus the response
+schema, identical for every cue — dominates the image, so RosettaCue sends it as
+a cacheable prefix and keeps only the row estimate and recognized lines in the
+per-cue turn.
+
+Because the profiles are independent, the cheap stages can run on a cheap model.
+Style recognition is a two-value classification and does not need a frontier
+model; translation benefits from one.
+
+OpenAI reasoning models bill reasoning tokens at the output rate, and the
+server-side default is not `none`. OCR gains nothing from deliberation, so every
+OpenAI profile defaults to `reasoning_effort: none` — leaving it unset is the
+single largest avoidable cost on that provider. Override it per profile in
+Settings → Models, or in a CLI config document's `provider_options` block.
+
+Enable debug logging to see per-stage `input_tokens`, `output_tokens`,
+`cache_read_input_tokens`, and `reasoning_tokens`; measure a short run before
+committing to a model rather than extrapolating from published rates.
+
 ## Status
 
 **Pre-1.0.** The project format is at schema version 1 and RosettaCue ships **no
@@ -231,20 +254,36 @@ cargo run -p rosettacue-cli -- project create ~/Subs/Belle.rosettacue --name Bel
 cargo run -p rosettacue-cli -- source inspect /Volumes/BELLE
 cargo run -p rosettacue-cli -- source attach ~/Subs/Belle.rosettacue /Volumes/BELLE
 cargo run -p rosettacue-cli -- source extract ~/Subs/Belle.rosettacue <source-id> --title 1
-cargo run -p rosettacue-cli -- ocr run ~/Subs/Belle.rosettacue \
-  --provider lm-studio --model <model-id> --language jpn
-cargo run -p rosettacue-cli -- ocr run ~/Subs/Belle.rosettacue \
-  --provider lm-studio --model <text-model-id> --language jpn \
-  --separate-ruby --ruby-model <ruby-model-id>
+cargo run -p rosettacue-cli -- ocr run ~/Subs/Belle.rosettacue --language jpn \
+  --config '{"recognition":{"provider":"lm_studio","model":"<model-id>"}}'
+cargo run -p rosettacue-cli -- ocr run ~/Subs/Belle.rosettacue --language jpn \
+  --config ~/Subs/belle-models.json
 cargo run -p rosettacue-cli -- export ~/Subs/Belle.rosettacue --output ~/Subs --format srt
 ```
 
-Remote providers read their key from an environment variable you name with
-`--api-key-env`; the key is never taken as a literal argument. In separate mode,
-Ruby options inherit the main Text OCR profile when the provider is omitted or
-matches the main provider. Selecting a different Ruby provider uses that
-provider's default endpoint and requires its own model and, when applicable,
-credentials.
+`ocr run` and `translate` take their model profiles as one JSON document via
+`--config` — a file path, or the document itself when the value starts with
+`{`. The document uses the same profile schema as the rest of the application:
+common fields flat, provider-specific parameters nested under
+`provider_options`. Omitted fields resolve to the provider's defaults, a
+present `ruby` profile selects separate ruby recognition, and an omitted
+`validation` profile inherits the recognition profile.
+
+```json
+{
+  "recognition": {
+    "provider": "open_ai",
+    "model": "gpt-5.6-luna",
+    "api_key_env": "OPENAI_API_KEY",
+    "provider_options": { "reasoning_effort": "none" }
+  },
+  "ruby": { "provider": "lm_studio", "model": "<ruby-model-id>" }
+}
+```
+
+Because a config document lives on disk, it never carries a key: remote
+providers name an environment variable in `api_key_env`, and a literal
+`api_key` field is rejected outright.
 
 ## Repository layout
 

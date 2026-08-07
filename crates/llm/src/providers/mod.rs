@@ -1,7 +1,7 @@
 use reqwest::blocking::Client;
 
 use crate::{
-    CompletionRequest, CompletionResponse, LlmError, LlmModel, LlmProvider, ProviderConfig,
+    CompletionRequest, CompletionResponse, LlmError, LlmModel, ProviderConfig, ProviderSpec,
 };
 
 mod anthropic;
@@ -16,10 +16,12 @@ pub(super) fn complete(
     request: &CompletionRequest<'_>,
 ) -> Result<CompletionResponse, LlmError> {
     match config.provider {
-        LlmProvider::LmStudio => lmstudio::complete(client, config, request),
-        LlmProvider::Ollama => ollama::complete(client, config, request),
-        LlmProvider::OpenAi => openai::complete(client, config, request),
-        LlmProvider::Anthropic => anthropic::complete(client, config, request),
+        ProviderSpec::LmStudio => lmstudio::complete(client, config, request),
+        ProviderSpec::Ollama => ollama::complete(client, config, request),
+        ProviderSpec::OpenAi { reasoning_effort } => {
+            openai::complete(client, config, request, reasoning_effort)
+        }
+        ProviderSpec::Anthropic => anthropic::complete(client, config, request),
     }
 }
 
@@ -28,9 +30,9 @@ pub(super) fn list_models(
     config: &ProviderConfig,
 ) -> Result<Vec<LlmModel>, LlmError> {
     match config.provider {
-        LlmProvider::LmStudio => lmstudio::list_models(client, config),
-        LlmProvider::Ollama => ollama::list_models(client, config),
-        LlmProvider::OpenAi => openai::list_models(client, config),
-        LlmProvider::Anthropic => anthropic::list_models(client, config),
+        ProviderSpec::LmStudio => lmstudio::list_models(client, config),
+        ProviderSpec::Ollama => ollama::list_models(client, config),
+        ProviderSpec::OpenAi { .. } => openai::list_models(client, config),
+        ProviderSpec::Anthropic => anthropic::list_models(client, config),
     }
 }
