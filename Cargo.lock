@@ -1283,6 +1283,7 @@ dependencies = [
  "anyhow",
  "clap",
  "rosettacue-core",
+ "serde",
  "serde_json",
  "tracing",
  "tracing-subscriber",

@@ -78,18 +78,65 @@ impl ReasoningEffort {
 ///
 /// A provider-specific parameter lives inside its provider's variant, so a
 /// configuration carrying another provider's parameter is unrepresentable and
-/// needs no cross-field validation. The variants flatten into profile JSON
-/// with `provider` as the tag: `{"provider": "open_ai", "reasoning_effort": "none"}`.
+/// needs no cross-field validation. In profile JSON the selection stays flat
+/// while the parameters nest under a `provider_options` block:
+/// `{"provider": "open_ai", "provider_options": {"reasoning_effort": "none"}}`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "provider", rename_all = "snake_case")]
+#[serde(from = "ProviderSpecWire", into = "ProviderSpecWire")]
 pub enum ProviderSpec {
     LmStudio,
     Ollama,
-    OpenAi {
-        #[serde(default)]
-        reasoning_effort: ReasoningEffort,
-    },
+    OpenAi { reasoning_effort: ReasoningEffort },
     Anthropic,
+}
+
+/// Wire shape for [`ProviderSpec`]: the provider tag plus an optional
+/// `provider_options` block.
+///
+/// The conversion, rather than a derived tagged enum, defines how imperfect
+/// stored data resolves: a missing or null block falls back to the provider's
+/// defaults, and a stray block on a provider that takes no options is dropped
+/// rather than rejected.
+#[derive(Serialize, Deserialize)]
+struct ProviderSpecWire {
+    provider: LlmProvider,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    provider_options: Option<ProviderOptionsWire>,
+}
+
+/// Every provider-specific parameter as it appears inside `provider_options`.
+///
+/// Fields for all providers share this one wire struct; the conversion picks
+/// the ones belonging to the tagged provider and ignores the rest.
+#[derive(Default, Serialize, Deserialize)]
+struct ProviderOptionsWire {
+    #[serde(default)]
+    reasoning_effort: ReasoningEffort,
+}
+
+impl From<ProviderSpecWire> for ProviderSpec {
+    fn from(wire: ProviderSpecWire) -> Self {
+        match wire.provider {
+            LlmProvider::OpenAi => Self::OpenAi {
+                reasoning_effort: wire.provider_options.unwrap_or_default().reasoning_effort,
+            },
+            kind => Self::default_for(kind),
+        }
+    }
+}
+
+impl From<ProviderSpec> for ProviderSpecWire {
+    fn from(spec: ProviderSpec) -> Self {
+        Self {
+            provider: spec.kind(),
+            provider_options: match spec {
+                ProviderSpec::OpenAi { reasoning_effort } => {
+                    Some(ProviderOptionsWire { reasoning_effort })
+                }
+                ProviderSpec::LmStudio | ProviderSpec::Ollama | ProviderSpec::Anthropic => None,
+            },
+        }
+    }
 }
 
 impl ProviderSpec {
@@ -391,17 +438,21 @@ mod tests {
     }
 
     #[test]
-    fn profiles_serialize_to_flat_json_with_provider_as_the_tag() {
+    fn provider_options_nest_under_their_own_block_in_profile_json() {
         let openai = serde_json::to_value(ProviderConfig::for_provider(LlmProvider::OpenAi))
             .expect("openai profile");
         assert_eq!(openai["provider"], "open_ai");
-        assert_eq!(openai["reasoning_effort"], "none");
+        assert_eq!(openai["provider_options"]["reasoning_effort"], "none");
         assert_eq!(openai["base_url"], "https://api.openai.com/v1");
+        assert!(
+            openai.get("reasoning_effort").is_none(),
+            "provider-specific parameters must not leak into the common namespace"
+        );
 
         let anthropic = serde_json::to_value(ProviderConfig::for_provider(LlmProvider::Anthropic))
             .expect("anthropic profile");
         assert_eq!(anthropic["provider"], "anthropic");
-        assert!(anthropic.get("reasoning_effort").is_none());
+        assert!(anthropic.get("provider_options").is_none());
     }
 
     #[test]
@@ -420,27 +471,32 @@ mod tests {
     }
 
     #[test]
-    fn an_openai_profile_without_reasoning_effort_defaults_to_none() {
-        let stored = serde_json::json!({
-            "provider": "open_ai",
-            "base_url": "https://api.openai.com/v1",
-            "model": "gpt-5.6-luna",
-            "api_key": null,
-            "timeout_seconds": 120,
-            "max_tokens": 512,
-            "max_attempts": 2
-        });
-        let config = serde_json::from_value::<ProviderConfig>(stored).expect("stored profile");
-        assert_eq!(
-            config.provider,
-            ProviderSpec::OpenAi {
-                reasoning_effort: ReasoningEffort::None
+    fn an_openai_profile_without_a_provider_options_block_defaults_to_none() {
+        for provider_options in [None, Some(serde_json::Value::Null)] {
+            let mut stored = serde_json::json!({
+                "provider": "open_ai",
+                "base_url": "https://api.openai.com/v1",
+                "model": "gpt-5.6-luna",
+                "api_key": null,
+                "timeout_seconds": 120,
+                "max_tokens": 512,
+                "max_attempts": 2
+            });
+            if let Some(null_block) = provider_options {
+                stored["provider_options"] = null_block;
             }
-        );
+            let config = serde_json::from_value::<ProviderConfig>(stored).expect("stored profile");
+            assert_eq!(
+                config.provider,
+                ProviderSpec::OpenAi {
+                    reasoning_effort: ReasoningEffort::None
+                }
+            );
+        }
     }
 
     #[test]
-    fn a_stray_reasoning_effort_on_another_provider_is_dropped() {
+    fn a_stray_provider_options_block_on_another_provider_is_dropped() {
         let stored = serde_json::json!({
             "provider": "anthropic",
             "base_url": "https://api.anthropic.com/v1",
@@ -449,7 +505,7 @@ mod tests {
             "timeout_seconds": 120,
             "max_tokens": 512,
             "max_attempts": 2,
-            "reasoning_effort": "low"
+            "provider_options": { "reasoning_effort": "low" }
         });
         let config = serde_json::from_value::<ProviderConfig>(stored).expect("stored profile");
         assert_eq!(config.provider, ProviderSpec::Anthropic);
