@@ -10,7 +10,7 @@ use rosettacue_domain::{
     CueEditDocument, CueGeometry, CueRecognition, CueReviewDecision, CueRevision, JobKind,
     JobProgress, JobStatus, OcrDocument, OcrStatus, ProjectJob, ProjectMetadata, ProjectSettings,
     ProjectSource, ProjectStatistics, ReviewStatus, RevisionAuthor, SourceKind, SourceMetadata,
-    SubtitleCue, SubtitleTrack, TrackMetadata,
+    SubtitleCue, SubtitleTrack, TrackMetadata, ValidationIssue,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use time::OffsetDateTime;
@@ -506,6 +506,10 @@ impl ProjectStore {
 
     /// Persists the validated OCR document and promotes it to the latest revision.
     ///
+    /// Soft validation issues are stored with the attempt. A cue that raised a
+    /// warning lands in `needs_review` rather than `unreviewed`: the result is
+    /// good enough to keep and not good enough to trust.
+    ///
     /// # Errors
     ///
     /// Returns an error when the transaction cannot be committed.
@@ -515,6 +519,7 @@ impl ProjectStore {
         run_id: Uuid,
         raw_response: &str,
         document: &OcrDocument,
+        issues: &[ValidationIssue],
         elapsed_ms: u64,
     ) -> Result<CueRecognition, ProjectError> {
         let timestamp = OffsetDateTime::now_utc().unix_timestamp();
@@ -526,6 +531,12 @@ impl ProjectStore {
             end_ms,
             subtitle: document.clone(),
         })?;
+        let issues_json = serde_json::to_string(issues)?;
+        let review_status = if ValidationIssue::any_needs_review(issues) {
+            ReviewStatus::NeedsReview
+        } else {
+            ReviewStatus::Unreviewed
+        };
         let elapsed_ms = i64::try_from(elapsed_ms)
             .map_err(|_| ProjectError::InvalidRecord("OCR elapsed time".to_owned()))?;
         self.connection.execute_batch("BEGIN IMMEDIATE")?;
@@ -535,7 +546,7 @@ impl ProjectStore {
                 INSERT INTO ocr_attempts (
                     id, cue_id, run_id, attempt_number, status, raw_response,
                     candidate, issues, elapsed_ms, created_at
-                ) VALUES (?1, ?2, ?3, 1, 'succeeded', ?4, ?5, '[]', ?6, ?7)
+                ) VALUES (?1, ?2, ?3, 1, 'succeeded', ?4, ?5, ?6, ?7, ?8)
                 ",
                 params![
                     Uuid::new_v4().to_string(),
@@ -543,6 +554,7 @@ impl ProjectStore {
                     run_id.to_string(),
                     raw_response,
                     document_json,
+                    issues_json,
                     elapsed_ms,
                     timestamp.to_string(),
                 ],
@@ -558,8 +570,8 @@ impl ProjectStore {
                 ],
             )?;
             self.connection.execute(
-                "UPDATE cues SET ocr_status = 'succeeded', review_status = 'unreviewed' WHERE id = ?1",
-                params![cue_id.to_string()],
+                "UPDATE cues SET ocr_status = 'succeeded', review_status = ?2 WHERE id = ?1",
+                params![cue_id.to_string(), review_status.as_str()],
             )?;
             Ok::<_, ProjectError>(())
         })();
@@ -1783,7 +1795,7 @@ mod tests {
             normalizations: Vec::new(),
         };
         let recognition = created
-            .save_ocr_success(cue.id, run_id, "{}", &document, 42)
+            .save_ocr_success(cue.id, run_id, "{}", &document, &[], 42)
             .expect("save OCR result");
         assert_eq!(recognition.document, document);
         assert_eq!(created.recognitions().expect("recognitions"), [recognition]);

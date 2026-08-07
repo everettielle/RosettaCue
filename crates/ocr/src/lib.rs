@@ -2,7 +2,6 @@ mod error;
 mod languages;
 mod lmstudio;
 mod prompt;
-mod row_detection;
 
 use std::path::PathBuf;
 
@@ -12,7 +11,7 @@ pub use lmstudio::{
     diagnose_provider, list_lmstudio_models, list_provider_models,
 };
 pub use prompt::PROMPT_VERSION;
-use rosettacue_domain::{CueGeometry, OcrDocument};
+use rosettacue_domain::{CueGeometry, OcrDocument, ValidationIssue};
 pub use rosettacue_layout::{CueLayout, LayoutOptions};
 pub use rosettacue_llm::{
     LlmProvider, ProviderConfig, ProviderDiagnostic, ProviderSpec, ReasoningEffort,
@@ -47,6 +46,9 @@ pub struct OcrRequest {
 #[derive(Debug, Clone)]
 pub struct OcrRecognition {
     pub document: OcrDocument,
+    /// Soft checks that did not pass. Never a reason to reject the result; the
+    /// warnings among them are a reason to put the cue in front of a person.
+    pub issues: Vec<ValidationIssue>,
     pub raw_response: String,
     pub elapsed_ms: u64,
 }

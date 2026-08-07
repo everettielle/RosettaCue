@@ -739,6 +739,7 @@ impl Application {
                         run_id,
                         &result.raw_response,
                         &result.document,
+                        &result.issues,
                         result.elapsed_ms,
                     )?;
                     progress(OcrProgress {
