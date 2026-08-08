@@ -125,7 +125,7 @@
   "save_as_save_copy": "Save copy",
   "save_as_title": "Save project as",
   "settings_api_key": "API key",
-  "settings_api_key_description": "Keys are not written to local preferences or project files.",
+  "settings_api_key_description": "Keys are encrypted by the OS keychain and never stored in project files or logs.",
   "settings_advanced": "Advanced",
   "settings_appearance": "Appearance",
   "settings_appearance_description": "Appearance follows the shadcn theme tokens across every window.",

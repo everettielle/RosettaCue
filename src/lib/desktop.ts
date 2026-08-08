@@ -20,6 +20,10 @@ const browserFallback: RosettaCueDesktopApi = {
   window: {
     setMode: async () => undefined,
   },
+  credentials: {
+    loadAll: async () => ({}),
+    save: async () => undefined,
+  },
   diagnostics: {
     snapshot: async () => ({
       enabled: false,
@@ -56,6 +60,7 @@ export const desktop = {
   on<T>(event: BackendEvent, listener: (payload: T) => void) {
     return bridge.on(event, (payload) => listener(payload as T))
   },
+  credentials: bridge.credentials,
   dialogs: bridge.dialogs,
   window: bridge.window,
   diagnostics: bridge.diagnostics,

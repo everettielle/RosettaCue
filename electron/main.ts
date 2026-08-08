@@ -18,6 +18,7 @@ import {
   type BackendMethod,
   type WindowMode,
 } from "./contracts"
+import { CredentialStore } from "./credentials"
 import { DiagnosticStore } from "./diagnostics"
 import { RustBackend } from "./rust-backend"
 import * as m from "../src/paraglide/messages.js"
@@ -30,6 +31,7 @@ const allowedEvents = new Set<string>(backendEvents)
 
 let mainWindow: BrowserWindow | null = null
 let debugWindow: BrowserWindow | null = null
+let credentials: CredentialStore | null = null
 let diagnostics: DiagnosticStore | null = null
 const backend = new RustBackend(
   (entry) => diagnostics?.record(entry),
@@ -335,9 +337,20 @@ function registerIpc() {
       return result.filePath
     }
   )
+
+  ipcMain.handle("rosettacue:credentials:load", () => {
+    return credentials?.loadAll() ?? {}
+  })
+  ipcMain.handle(
+    "rosettacue:credentials:save",
+    (_event, entries: Record<string, string | null>) => {
+      credentials?.save(entries)
+    }
+  )
 }
 
 app.whenReady().then(async () => {
+  credentials = new CredentialStore(app.getPath("userData"))
   diagnostics = new DiagnosticStore(app.getPath("userData"))
   registerIpc()
   diagnostics.on("entry", (entry) => {

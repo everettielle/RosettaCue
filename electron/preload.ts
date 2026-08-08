@@ -49,6 +49,14 @@ contextBridge.exposeInMainWorld("rosettaCue", {
       return ipcRenderer.invoke("rosettacue:window:set-mode", mode)
     },
   },
+  credentials: {
+    loadAll() {
+      return ipcRenderer.invoke("rosettacue:credentials:load")
+    },
+    save(entries: Record<string, string | null>) {
+      return ipcRenderer.invoke("rosettacue:credentials:save", entries)
+    },
+  },
   diagnostics: {
     snapshot(sessionId?: string) {
       return ipcRenderer.invoke("rosettacue:diagnostics:snapshot", sessionId)

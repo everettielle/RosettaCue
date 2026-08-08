@@ -81,6 +81,10 @@ export type RosettaCueDesktopApi = {
   window: {
     setMode(mode: WindowMode): Promise<void>
   }
+  credentials: {
+    loadAll(): Promise<Record<string, string>>
+    save(entries: Record<string, string | null>): Promise<void>
+  }
   diagnostics: {
     snapshot(sessionId?: string): Promise<DiagnosticSnapshot>
     setEnabled(enabled: boolean): Promise<DiagnosticSnapshot>

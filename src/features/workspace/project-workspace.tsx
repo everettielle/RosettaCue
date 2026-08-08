@@ -549,6 +549,25 @@ export function ProjectWorkspace({
   }, [project.path])
 
   React.useEffect(() => {
+    let active = true
+    desktop.credentials.loadAll().then((keys) => {
+      if (!active || Object.keys(keys).length === 0) return
+      setSettings((current) => {
+        const profiles = { ...current.profiles }
+        for (const task of ["ocr", "ruby", "validation", "translation"] as const) {
+          if (keys[task]) {
+            profiles[task] = { ...profiles[task], api_key: keys[task] }
+          }
+        }
+        return { ...current, profiles }
+      })
+    })
+    return () => {
+      active = false
+    }
+  }, [])
+
+  React.useEffect(() => {
     const removePgsListener = desktop.on<PgsExtractionProgress>(
       "pgs-extraction-progress",
       (progress) => {
@@ -1518,6 +1537,12 @@ export function ProjectWorkspace({
           )
           setSettings(next)
           saveWorkspaceSettings(next)
+          await desktop.credentials.save({
+            ocr: next.profiles.ocr.api_key,
+            ruby: next.profiles.ruby.api_key,
+            validation: next.profiles.validation.api_key,
+            translation: next.profiles.translation.api_key,
+          })
           onProjectChange(nextProject)
           await loadDocument()
           setError(null)
