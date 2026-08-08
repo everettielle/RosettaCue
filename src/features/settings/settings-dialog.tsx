@@ -120,10 +120,11 @@ const providers: Array<{ value: LlmProvider; label: string }> = [
 
 const reasoningEfforts: Array<{ value: ReasoningEffort; label: string }> = [
   { value: "none", label: "none" },
-  { value: "minimal", label: "minimal" },
   { value: "low", label: "low" },
   { value: "medium", label: "medium" },
   { value: "high", label: "high" },
+  { value: "xhigh", label: "xhigh" },
+  { value: "max", label: "max" },
 ]
 
 const tasks: Array<{ value: ModelTask; label: string }> = [

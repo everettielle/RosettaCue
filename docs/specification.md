@@ -1180,7 +1180,7 @@ Settings uses a left-section layout:
 
 Supported providers are LM Studio, Ollama, OpenAI API, and Anthropic API. A profile contains the common fields — base URL, model, optional session API key, timeout, token limit, attempt count — plus a provider spec: the provider selection together with the parameters only that provider accepts, currently reasoning effort on OpenAI. A parameter lives on its provider's branch of the spec, so a profile carrying another provider's parameter is unrepresentable rather than validated away. In profile JSON the common fields stay flat and the provider-specific parameters nest under a `provider_options` block; the CLI accepts the same document shape through `--config`, with `api_key_env` naming an environment variable in place of a literal key, since a config document lives on disk. API keys remain only in renderer memory and are redacted from local preferences and project records.
 
-OpenAI reasoning models take the output cap as `max_completion_tokens` and reject the sampling parameters local OpenAI-compatible servers rely on for determinism, so the two dialects build different request bodies. Reasoning tokens are billed at the output rate and the server-side default is not `none`, so every OpenAI profile defaults to `reasoning_effort: none`: recognition, style, and translation are transcription tasks that gain no accuracy from deliberation.
+OpenAI reasoning models take the output cap as `max_completion_tokens` and reject the sampling parameters local OpenAI-compatible servers rely on for determinism, so the two dialects build different request bodies. Reasoning tokens are billed at the output rate and the server-side default is not `none`, so every OpenAI profile defaults to `reasoning_effort: none`: recognition, style, and translation are transcription tasks that gain no accuracy from deliberation. `ReasoningEffort` carries exactly the six values the `gpt-5.6` family (Sol, Terra, Luna) accepts — `none`, `low`, `medium`, `high`, `xhigh`, `max` — rather than every value any OpenAI reasoning model has ever accepted: `minimal`, valid on `gpt-5`/`gpt-5.1`, is rejected by `gpt-5.6` models, and `xhigh`/`max` did not exist before it.
 
 Recognition, ruby, style, and translation prompts are each split into a stable half — task, direction, and language guidance plus the response schema, byte-identical for every block at that stage, language, and writing direction — and a per-block half carrying the deterministic unit and glyph estimates or the already-recognized main lines. Writing direction belongs to the stable half: it has two values, so a stage keeps at most two cache entries and both still hit, whereas moving the direction wording into the per-block half would break prefix sharing outright. Anthropic requests place a cache breakpoint at the end of the stable half; OpenAI requests fold it into the system turn so automatic prefix caching can match it. Providers that do not cache are unaffected, because the two halves are concatenated in order.
 
@@ -1285,10 +1285,11 @@ classDiagram
   class ReasoningEffort {
     <<enumeration>>
     none
-    minimal
     low
     medium
     high
+    xhigh
+    max
   }
   class ProviderClient {
     +models()

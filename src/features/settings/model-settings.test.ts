@@ -127,6 +127,29 @@ describe("workspace model settings persistence", () => {
     })
   })
 
+  it("falls back to none for a reasoning effort this version no longer accepts", () => {
+    localStorage.setItem(
+      "rosettacue.workspace-settings.v3",
+      JSON.stringify({
+        profiles: {
+          ...defaultWorkspaceSettings.profiles,
+          ocr: {
+            ...defaultWorkspaceSettings.profiles.ocr,
+            provider: "open_ai",
+            model: "gpt-5.6-luna",
+            provider_options: { reasoning_effort: "minimal" },
+          },
+        },
+      })
+    )
+
+    const ocr = loadWorkspaceSettings().profiles.ocr
+
+    expect(
+      ocr.provider === "open_ai" && ocr.provider_options.reasoning_effort
+    ).toBe("none")
+  })
+
   it("drops provider options stored on a provider that takes none", () => {
     localStorage.setItem(
       "rosettacue.workspace-settings.v3",

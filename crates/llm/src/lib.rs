@@ -46,6 +46,13 @@ impl LlmProvider {
 
 /// Reasoning depth for `OpenAI` reasoning models.
 ///
+/// These six values are what the current `gpt-5.6` family (Sol, Terra, Luna)
+/// accepts for `reasoning_effort`; `minimal`, valid on the `gpt-5`/`gpt-5.1`
+/// generation, is rejected by `gpt-5.6` models, and `xhigh`/`max` did not exist
+/// before it. There is no provider-agnostic superset to fall back on, so this
+/// tracks the model family this application targets rather than every value
+/// any `OpenAI` reasoning model has ever accepted.
+///
 /// Reasoning tokens are billed at the output rate. OCR and translation are
 /// transcription tasks rather than deliberation, so profiles default to
 /// [`ReasoningEffort::None`]; leaving the parameter unset would let the
@@ -55,10 +62,12 @@ impl LlmProvider {
 pub enum ReasoningEffort {
     #[default]
     None,
-    Minimal,
     Low,
     Medium,
     High,
+    #[serde(rename = "xhigh")]
+    XHigh,
+    Max,
 }
 
 impl ReasoningEffort {
@@ -66,10 +75,11 @@ impl ReasoningEffort {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::None => "none",
-            Self::Minimal => "minimal",
             Self::Low => "low",
             Self::Medium => "medium",
             Self::High => "high",
+            Self::XHigh => "xhigh",
+            Self::Max => "max",
         }
     }
 }
@@ -491,6 +501,36 @@ mod tests {
                 ProviderSpec::OpenAi {
                     reasoning_effort: ReasoningEffort::None
                 }
+            );
+        }
+    }
+
+    /// The exact `reasoning_effort` values the `gpt-5.6` family accepts.
+    /// `minimal`, valid on `gpt-5`/`gpt-5.1`, is rejected by `gpt-5.6` models;
+    /// `xhigh` has no underscore, which `#[serde(rename_all = "snake_case")]`
+    /// would get wrong left to its own default.
+    #[test]
+    fn wire_values_match_what_openai_accepts_for_gpt_5_6() {
+        let cases = [
+            (ReasoningEffort::None, "none"),
+            (ReasoningEffort::Low, "low"),
+            (ReasoningEffort::Medium, "medium"),
+            (ReasoningEffort::High, "high"),
+            (ReasoningEffort::XHigh, "xhigh"),
+            (ReasoningEffort::Max, "max"),
+        ];
+        for (effort, wire) in cases {
+            assert_eq!(effort.as_str(), wire);
+            assert_eq!(
+                serde_json::to_value(effort).expect("serialize"),
+                serde_json::Value::String(wire.to_owned())
+            );
+            assert_eq!(
+                serde_json::from_value::<ReasoningEffort>(serde_json::Value::String(
+                    wire.to_owned()
+                ))
+                .expect("deserialize"),
+                effort
             );
         }
     }

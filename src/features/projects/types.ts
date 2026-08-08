@@ -229,7 +229,14 @@ export type PgsExtractionResult = {
 
 export type LlmProvider = "lm_studio" | "ollama" | "open_ai" | "anthropic"
 
-export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high"
+/**
+ * Mirrors `rosettacue_llm::ReasoningEffort`: the values the `gpt-5.6` family
+ * (Sol, Terra, Luna) accepts for `reasoning_effort`. "minimal", valid on
+ * `gpt-5`/`gpt-5.1`, is rejected by `gpt-5.6` models; "xhigh" and "max" did
+ * not exist before it.
+ */
+export type ReasoningEffort =
+  "none" | "low" | "medium" | "high" | "xhigh" | "max"
 
 /**
  * Provider selection plus the parameters only that provider accepts, mirroring

@@ -73,6 +73,12 @@ document. Breaking changes are always listed first.
   phrase, each recognized as its own request and reassembled as separate blocks.
   The em now comes from the longest band on the axis that has fewer of them,
   which is the axis running across the text rather than along it.
+- **`reasoning_effort` values matched to the `gpt-5.6` family.** `minimal` was
+  a `gpt-5`/`gpt-5.1` value; `gpt-5.6` models (Sol, Terra, Luna) reject it and
+  accept `xhigh` and `max` instead, which the enum did not have. The full set
+  is now `none`, `low`, `medium`, `high`, `xhigh`, `max`. A stored profile
+  carrying `minimal` from before this change falls back to `none`, the same
+  way an absent value already did.
 
 ## [0.1.0] — 2026-08-06
 

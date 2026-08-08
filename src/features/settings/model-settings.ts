@@ -84,6 +84,15 @@ function commonDefaults(provider: LlmProvider): ProviderCommon {
   }
 }
 
+const REASONING_EFFORTS: ReadonlySet<string> = new Set([
+  "none",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+] satisfies ReasoningEffort[])
+
 /** The only place that resolves stored provider-specific values. */
 function normalizeSpec(
   provider: LlmProvider,
@@ -93,7 +102,16 @@ function normalizeSpec(
     case "open_ai":
       return {
         provider,
-        provider_options: { reasoning_effort: storedEffort ?? "none" },
+        // A profile saved before "minimal" was retired for the gpt-5.6
+        // family, or before "xhigh"/"max" existed, stores a value this
+        // version no longer recognizes; that falls back the same way an
+        // absent value does rather than reaching the backend unresolved.
+        provider_options: {
+          reasoning_effort:
+            storedEffort && REASONING_EFFORTS.has(storedEffort)
+              ? storedEffort
+              : "none",
+        },
       }
     case "lm_studio":
     case "ollama":
