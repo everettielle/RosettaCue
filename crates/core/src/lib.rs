@@ -18,7 +18,7 @@ pub use rosettacue_export::{
 };
 use rosettacue_ocr::PROMPT_VERSION;
 pub use rosettacue_ocr::{
-    LlmProvider, LmStudioConfig, LmStudioModel, OcrPipelineConfig, ProviderConfig,
+    LayoutTuning, LlmProvider, LmStudioConfig, LmStudioModel, OcrPipelineConfig, ProviderConfig,
     ProviderDiagnostic, ProviderSpec, ReasoningEffort,
 };
 use rosettacue_ocr::{OcrBackend, OcrRequest, ProviderOcrBackend};
@@ -557,9 +557,10 @@ impl Application {
         self,
         project_path: impl AsRef<Path>,
         language: &str,
+        tuning: rosettacue_ocr::LayoutTuning,
     ) -> Result<LayoutSurvey, LayoutSurveyError> {
         let store = ProjectStore::open(project_path)?;
-        let options = rosettacue_ocr::layout_options(language)?;
+        let options = rosettacue_ocr::layout_options(language, tuning)?;
         let mut builder = SurveyBuilder::default();
         for cue in store.cues()? {
             match read_cue_layout(&store, &cue, &options) {

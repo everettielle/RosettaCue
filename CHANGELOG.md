@@ -43,7 +43,14 @@ document. Breaking changes are always listed first.
   original bitmap gets block outlines drawn over it.
 - **`rosettacue ocr layout-survey <project>`.** Reports a project's block-count
   distribution, writing-mode split, and analyzer doubts without contacting a
-  provider.
+  provider. `--separation-em`, `--minimum-block-em2`, and `--maximum-blocks`
+  try a threshold over a whole track before it is committed anywhere.
+- **An OCR settings section.** The block-detection thresholds — separation in
+  em, minimum fragment area in em², and the block-count cap — are now settings
+  with a documented range, a stated default, and a restore-defaults action,
+  rather than constants in the analyzer. The CLI's model config document takes
+  the same three under a `layout` block. Every value is clamped inside the
+  analyzer, so no caller can hand it a separation of zero.
 - **Soft validation issues.** A transcription whose character count disagrees
   with the bitmap measurement is accepted and flagged for review rather than
   rejected. These are the first entries in the attempts table's `issues` column.
@@ -57,6 +64,15 @@ document. Breaking changes are always listed first.
   column fragments into one band per glyph under that projection, so a correct
   answer was rejected and every retry consumed. Unit counting is now per block
   and counts columns for vertical blocks.
+- **A line parted by ideographic spaces is one block again.** The em that scales
+  the block-separation threshold was read from the median band extent along each
+  axis. Most scripts break a glyph into several ink bands, so along the axis
+  text flows that median measures a stroke rather than a glyph, and the
+  threshold derived from it came out narrower than the blank an ideographic
+  space leaves. `（鈴）ぶはあっ！　はあっ…　はあっ…` was cut into a block per
+  phrase, each recognized as its own request and reassembled as separate blocks.
+  The em now comes from the longest band on the axis that has fewer of them,
+  which is the axis running across the text rather than along it.
 
 ## [0.1.0] — 2026-08-06
 

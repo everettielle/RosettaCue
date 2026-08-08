@@ -13,10 +13,14 @@
 mod bands;
 mod mask;
 
-use bands::{Band, RASTER_GAP, cluster, column_activity, main_bands, median_extent, row_activity};
+use std::ops::RangeInclusive;
+
+use bands::{
+    Band, RASTER_GAP, cluster, column_activity, main_bands, max_extent, median_extent, row_activity,
+};
 pub use mask::{Mask, crop_png, decode_mask};
 use rosettacue_domain::{BlockBounds, BlockSource, WritingMode};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// An axis-aligned rectangle in cue-bitmap pixels.
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -77,24 +81,97 @@ pub enum BlockOrder {
     RightToLeft,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct LayoutOptions {
+/// The block-detection thresholds, in units the bitmap's own em resolves.
+///
+/// These are the numbers that decide how a cue is cut into blocks. They are
+/// separated from [`LayoutOptions`] because they are the tunable half: reading
+/// order is language policy and nobody adjusts it per project, while these
+/// three are exactly what a user reaches for when a track's typesetting splits
+/// or fuses in a way the defaults did not anticipate.
+///
+/// Every value is expressed against the em the analyzer measures from the
+/// bitmap, so one setting holds across resolutions and font sizes.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LayoutTuning {
     /// Blank space of this many em separates two blocks.
     pub separation_em: f32,
     /// Fragments smaller than this many em² are merged into their neighbour.
     pub minimum_block_em2: f32,
     /// More blocks than this means the analysis went wrong; degrade instead.
     pub maximum_blocks: u32,
-    pub block_order: BlockOrder,
 }
 
-impl Default for LayoutOptions {
+/// The supported range for [`LayoutTuning::separation_em`].
+///
+/// The floor is what keeps an ideographic space — one em of blank, plus the
+/// side bearings around it — from reading as a block boundary; the ceiling is
+/// wider than any cue is tall, so nothing above it can ever split.
+pub const SEPARATION_EM_RANGE: RangeInclusive<f32> = 1.5..=8.0;
+/// The supported range for [`LayoutTuning::minimum_block_em2`]. Zero merges nothing.
+pub const MINIMUM_BLOCK_EM2_RANGE: RangeInclusive<f32> = 0.0..=8.0;
+/// The supported range for [`LayoutTuning::maximum_blocks`].
+pub const MAXIMUM_BLOCKS_RANGE: RangeInclusive<u32> = 1..=32;
+
+impl Default for LayoutTuning {
     fn default() -> Self {
         Self {
             separation_em: 2.0,
             minimum_block_em2: 0.5,
             maximum_blocks: 8,
-            block_order: BlockOrder::LeftToRight,
+        }
+    }
+}
+
+impl LayoutTuning {
+    /// The tuning with every value forced into its supported range.
+    ///
+    /// These numbers reach the analyzer from a settings dialog and from JSON
+    /// documents on disk, so they are checked rather than trusted: a zero or
+    /// negative separation would cut at every blank column between glyphs, and
+    /// a NaN would compare false against both ends of any range it is tested
+    /// with. An out-of-range value falls back to the default rather than to the
+    /// nearest bound only when it is not a number at all.
+    #[must_use]
+    pub fn clamped(self) -> Self {
+        let default = Self::default();
+        Self {
+            separation_em: clamp_f32(
+                self.separation_em,
+                default.separation_em,
+                SEPARATION_EM_RANGE,
+            ),
+            minimum_block_em2: clamp_f32(
+                self.minimum_block_em2,
+                default.minimum_block_em2,
+                MINIMUM_BLOCK_EM2_RANGE,
+            ),
+            maximum_blocks: self
+                .maximum_blocks
+                .clamp(*MAXIMUM_BLOCKS_RANGE.start(), *MAXIMUM_BLOCKS_RANGE.end()),
+        }
+    }
+}
+
+fn clamp_f32(value: f32, default: f32, range: RangeInclusive<f32>) -> f32 {
+    if value.is_nan() {
+        return default;
+    }
+    value.clamp(*range.start(), *range.end())
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LayoutOptions {
+    pub tuning: LayoutTuning,
+    pub block_order: BlockOrder,
+}
+
+impl LayoutOptions {
+    #[must_use]
+    pub const fn new(tuning: LayoutTuning, block_order: BlockOrder) -> Self {
+        Self {
+            tuning,
+            block_order,
         }
     }
 }
@@ -215,6 +292,10 @@ pub fn analyze_png(png_bytes: &[u8], options: &LayoutOptions) -> Result<CueLayou
 /// Analyzes a foreground mask. Pure, total, and the whole algorithm.
 #[must_use]
 pub fn analyze_mask(mask: &Mask, options: &LayoutOptions) -> CueLayout {
+    // The thresholds may come straight from a settings dialog or a config
+    // document, so they are pulled into range here rather than at the edge:
+    // this is the one place every caller passes through.
+    let tuning = options.tuning.clamped();
     let image = mask.area();
     let mut doubts = Vec::new();
     let Some(content) = bands::tight_bounds(mask, image) else {
@@ -223,13 +304,13 @@ pub fn analyze_mask(mask: &Mask, options: &LayoutOptions) -> CueLayout {
     };
 
     let em = bootstrap_em(mask, content);
-    let separation = scale(em, options.separation_em).max(1);
+    let separation = scale(em, tuning.separation_em).max(1);
     let mut rectangles = Vec::new();
     cut(mask, content, separation, CUT_DEPTH, &mut rectangles);
 
-    let minimum_area = u64::from(scale(em, options.minimum_block_em2)) * u64::from(em);
+    let minimum_area = u64::from(scale(em, tuning.minimum_block_em2)) * u64::from(em);
     let merged = merge_fragments(rectangles, minimum_area);
-    if u32::try_from(merged.len()).unwrap_or(u32::MAX) > options.maximum_blocks {
+    if u32::try_from(merged.len()).unwrap_or(u32::MAX) > tuning.maximum_blocks {
         doubts.push(LayoutDoubt::BlockCountCapped {
             found: u32::try_from(merged.len()).unwrap_or(u32::MAX),
         });
@@ -290,14 +371,28 @@ fn degraded(image: Rect, doubts: Vec<LayoutDoubt>) -> CueLayout {
 /// Estimates the full-width glyph size before any block is known.
 ///
 /// Separating blocks needs a threshold in em, but em is normally read off a
-/// block — so the first estimate has to come from the whole cue. Along the axis
-/// the text flows, neighbouring glyphs merge into long runs; across it, bands
-/// stay one em apart. Taking the smaller of the two medians therefore reads the
-/// em off whichever axis is the clean one, without knowing the direction yet.
+/// block — so the first estimate has to come from the whole cue, without
+/// knowing which way the text runs. Band counts settle that: across the flow
+/// there is one band per line of text, while along it there is one per glyph or
+/// per stroke, so the axis with fewer bands is the one running across. On that
+/// axis the longest band is a line of text seen edge on, which is one em.
+///
+/// Neither the median nor the other axis can stand in for it. Most scripts
+/// break a glyph into several ink bands along the flow — the two radicals of
+/// 鈴, the three dots of `…`, the stem and bowl of a Latin letter — so bands
+/// there measure strokes, and both the middle and the longest of them come out
+/// a fraction of an em. A separation threshold scaled from that fraction is
+/// narrower than the blank an ideographic space leaves, which cuts one line of
+/// dialogue into a block per phrase.
 fn bootstrap_em(mask: &Mask, content: Rect) -> u32 {
     let rows = cluster(&row_activity(mask, content), content.y, RASTER_GAP);
     let columns = cluster(&column_activity(mask, content), content.x, RASTER_GAP);
-    median_extent(&rows).min(median_extent(&columns)).max(1)
+    let across = if rows.len() <= columns.len() {
+        &rows
+    } else {
+        &columns
+    };
+    max_extent(across).max(1)
 }
 
 fn scale(em: u32, factor: f32) -> u32 {

@@ -892,6 +892,7 @@ export function ProjectWorkspace({
             ? settings.profiles.ruby
             : null,
           validation: settings.profiles.validation,
+          layout: settings.layout,
         },
       })
       onProjectChange(result.project)

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import {
+  defaultLayoutTuning,
   defaultWorkspaceSettings,
   loadWorkspaceSettings,
   saveWorkspaceSettings,
@@ -90,6 +91,40 @@ describe("workspace model settings persistence", () => {
     expect(
       ocr.provider === "open_ai" && ocr.provider_options.reasoning_effort
     ).toBe("none")
+  })
+
+  it("restores block-detection thresholds and defaults the ones never stored", () => {
+    const settings = structuredClone(defaultWorkspaceSettings)
+    settings.layout.separation_em = 3.5
+
+    saveWorkspaceSettings(settings)
+
+    expect(loadWorkspaceSettings().layout).toEqual({
+      ...defaultLayoutTuning,
+      separation_em: 3.5,
+    })
+  })
+
+  it("pulls stored block-detection thresholds back into their supported range", () => {
+    localStorage.setItem(
+      "rosettacue.workspace-settings.v3",
+      JSON.stringify({
+        profiles: defaultWorkspaceSettings.profiles,
+        layout: {
+          separation_em: 0,
+          minimum_block_em2: "half an em",
+          maximum_blocks: 4000,
+        },
+      })
+    )
+
+    // A separation of zero would cut at every blank column between glyphs, so
+    // a stored value the analyzer would refuse is resolved here as well.
+    expect(loadWorkspaceSettings().layout).toEqual({
+      separation_em: 1.5,
+      minimum_block_em2: defaultLayoutTuning.minimum_block_em2,
+      maximum_blocks: 32,
+    })
   })
 
   it("drops provider options stored on a provider that takes none", () => {

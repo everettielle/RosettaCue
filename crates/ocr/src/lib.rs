@@ -12,24 +12,27 @@ pub use lmstudio::{
 };
 pub use prompt::PROMPT_VERSION;
 use rosettacue_domain::{CueGeometry, OcrDocument, ValidationIssue};
-pub use rosettacue_layout::{CueLayout, LayoutOptions};
+pub use rosettacue_layout::{CueLayout, LayoutOptions, LayoutTuning};
 pub use rosettacue_llm::{
     LlmProvider, ProviderConfig, ProviderDiagnostic, ProviderSpec, ReasoningEffort,
 };
 
-/// The layout options a language implies.
+/// The layout options a language and a tuning imply.
 ///
-/// Reading order is language policy, so it is resolved from the same preset
-/// table the prompts come from rather than being chosen at each call site.
+/// The two halves come from different places on purpose. Reading order is
+/// language policy, so it is resolved from the same preset table the prompts
+/// come from rather than being chosen at each call site; the thresholds are the
+/// user's, because only they can see the track whose typesetting the defaults
+/// read wrong.
 ///
 /// # Errors
 ///
 /// Returns an error when the language has no preset.
-pub fn layout_options(language: &str) -> Result<LayoutOptions, OcrError> {
-    Ok(LayoutOptions {
-        block_order: languages::resolve(language)?.block_order,
-        ..LayoutOptions::default()
-    })
+pub fn layout_options(language: &str, tuning: LayoutTuning) -> Result<LayoutOptions, OcrError> {
+    Ok(LayoutOptions::new(
+        tuning,
+        languages::resolve(language)?.block_order,
+    ))
 }
 
 #[derive(Debug, Clone)]

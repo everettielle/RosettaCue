@@ -263,10 +263,22 @@ export type ProviderCommon = {
 
 export type ProviderConfig = ProviderCommon & ProviderSpec
 
+/**
+ * The block-detection thresholds, in units of the em the analyzer measures
+ * from each Cue bitmap, so one setting holds across resolutions and font sizes.
+ * Mirrors `rosettacue_layout::LayoutTuning`; the backend clamps every value.
+ */
+export type LayoutTuning = {
+  separation_em: number
+  minimum_block_em2: number
+  maximum_blocks: number
+}
+
 export type OcrPipelineConfig = {
   recognition: ProviderConfig
   ruby: ProviderConfig | null
   validation: ProviderConfig
+  layout: LayoutTuning
 }
 
 export type LlmModel = { id: string }

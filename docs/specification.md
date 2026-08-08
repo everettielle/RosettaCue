@@ -795,14 +795,30 @@ Before the first provider request, the `rosettacue-layout` crate reduces the PNG
 to a foreground mask and answers three questions about it without recognizing a
 character: where the Cue's text blocks are, which way each one runs, and how many
 units — rows in horizontal writing, columns in vertical writing — and glyphs each
-should hold. Blocks are separated by an X-Y cut at blank runs wider than two em,
-where the em is bootstrapped from the smaller of the two per-axis median band
-extents; along the axis text flows, glyph bands merge, so the smaller median
-reads the em off whichever axis is clean without knowing the direction yet.
+should hold. Blocks are separated by an X-Y cut at blank runs wider than two em.
+The em is bootstrapped from band counts: across the flow there is one band per
+line of text, while along it there is one per glyph or per stroke, so the axis
+with fewer bands is the one running across, and its longest band is a line of
+text seen edge on — one em. Neither the median of that axis nor anything from
+the other axis can stand in for it. Most scripts break a glyph into several ink
+bands along the flow — the two radicals of 鈴, the three dots of `…`, the stem
+and bowl of a Latin letter — so bands there measure strokes, and a separation
+threshold scaled from one is narrower than the blank an ideographic space
+leaves, which cuts one line of dialogue into a block per phrase.
 Direction is decided by block shape first, with band counts settling only blocks
 close to square. Unit counting keeps the existing rule that a band shorter than
 72% of the longest is annotation rather than main text, which separates ruby rows
 from main rows horizontally and ruby columns from main columns vertically.
+
+The three thresholds the cut depends on — the separation in em, the minimum
+fragment area in em², and the block-count cap — are settings rather than
+constants, exposed in the OCR settings section, accepted in the CLI's model
+config document under a `layout` block, and overridable per run on
+`layout-survey`. Everything is measured against the em the analyzer reads from
+the bitmap, so one value holds across resolutions and font sizes. Reading order
+stays language policy and is not exposed. Every value is clamped to a supported
+range inside the analyzer, which is the one place all callers pass through: a
+separation of zero would cut at every blank column between glyphs.
 
 Analysis never fails. No foreground, more fragments than the cap, or an
 undecidable direction all degrade to one horizontal block covering the whole
@@ -838,7 +854,10 @@ wording into the per-block half would end prefix sharing outright.
 `rosettacue ocr layout-survey <project>` runs the analysis alone over every Cue
 of a project and reports the block-count distribution, the writing-mode split,
 the mixed-direction and degraded counts, and how often each analyzer doubt was
-raised, without contacting a provider.
+raised, without contacting a provider. `--separation-em`, `--minimum-block-em2`,
+and `--maximum-blocks` override the stored thresholds for that run, which is how
+a candidate value is measured over a whole track before it is committed
+anywhere.
 
 For Japanese, normalization records every change and applies language-specific
 punctuation and character rules. The canonical long-vowel mark is `ー`;
@@ -1156,6 +1175,7 @@ Settings uses a left-section layout:
 - **General:** theme and media-tool diagnostics.
 - **Project:** OCR language, translation target language, and exact source-to-translation proper-noun mappings. These values persist in `ProjectMetadata` and never apply to an unrelated project.
 - **Models:** independent Text OCR, optional separate Ruby, Style, and post-OCR Translation profiles. A switch selects the two-request combined pipeline or the three-request separated pipeline and shows the corresponding phase numbers and cost/latency note.
+- **OCR:** the block-detection thresholds — separation in em, minimum fragment area in em², and the block-count cap — each with its supported range, its default, and a restore-defaults action. These govern the deterministic analysis that runs before the first provider request; the models that run afterwards stay under **Models**.
 - **Advanced:** application-wide debug logging and the independent Debug Log window.
 
 Supported providers are LM Studio, Ollama, OpenAI API, and Anthropic API. A profile contains the common fields — base URL, model, optional session API key, timeout, token limit, attempt count — plus a provider spec: the provider selection together with the parameters only that provider accepts, currently reasoning effort on OpenAI. A parameter lives on its provider's branch of the spec, so a profile carrying another provider's parameter is unrepresentable rather than validated away. In profile JSON the common fields stay flat and the provider-specific parameters nest under a `provider_options` block; the CLI accepts the same document shape through `--config`, with `api_key_env` naming an environment variable in place of a literal key, since a config document lives on disk. API keys remain only in renderer memory and are redacted from local preferences and project records.

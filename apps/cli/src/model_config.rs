@@ -9,7 +9,7 @@
 //! literal `api_key` is rejected outright.
 
 use rosettacue_core::{
-    LlmProvider, OcrPipelineConfig, ProviderConfig, ProviderSpec, ReasoningEffort,
+    LayoutTuning, LlmProvider, OcrPipelineConfig, ProviderConfig, ProviderSpec, ReasoningEffort,
 };
 
 #[derive(Debug, serde::Deserialize)]
@@ -22,6 +22,10 @@ pub struct ModelConfigDoc {
     /// Absent inherits the recognition profile.
     #[serde(default)]
     validation: Option<ProfileDoc>,
+    /// Block-detection thresholds. Absent takes the analyzer's defaults; a
+    /// present block may set any subset of them.
+    #[serde(default)]
+    layout: LayoutTuning,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -77,6 +81,7 @@ pub fn load_pipeline(argument: &str) -> anyhow::Result<OcrPipelineConfig> {
         recognition,
         ruby,
         validation,
+        layout: doc.layout,
     })
 }
 
@@ -277,6 +282,32 @@ mod tests {
             pipeline.ruby.expect("ruby profile").model,
             "ruby-specialist"
         );
+    }
+
+    #[test]
+    fn a_layout_block_overrides_only_the_thresholds_it_names() {
+        let pipeline = load_pipeline(
+            r#"{
+                "recognition": { "provider": "lm_studio", "model": "gemma-test" },
+                "layout": { "separation_em": 3.5 }
+            }"#,
+        )
+        .expect("pipeline");
+        let defaults = LayoutTuning::default();
+        assert!((pipeline.layout.separation_em - 3.5).abs() < f32::EPSILON);
+        assert!(
+            (pipeline.layout.minimum_block_em2 - defaults.minimum_block_em2).abs() < f32::EPSILON
+        );
+        assert_eq!(pipeline.layout.maximum_blocks, defaults.maximum_blocks);
+    }
+
+    #[test]
+    fn an_omitted_layout_block_takes_the_analyzer_defaults() {
+        let pipeline = load_pipeline(
+            r#"{ "recognition": { "provider": "lm_studio", "model": "gemma-test" } }"#,
+        )
+        .expect("pipeline");
+        assert_eq!(pipeline.layout, LayoutTuning::default());
     }
 
     #[test]

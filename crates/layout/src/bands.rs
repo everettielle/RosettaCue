@@ -107,6 +107,11 @@ pub(crate) fn median_extent(bands: &[Band]) -> u32 {
     median(bands.iter().map(|band| band.extent()).collect())
 }
 
+/// The longest band extent, or zero when there are no bands.
+pub(crate) fn max_extent(bands: &[Band]) -> u32 {
+    bands.iter().map(|band| band.extent()).max().unwrap_or(0)
+}
+
 /// The middle blank run between consecutive bands, or zero when there is none.
 ///
 /// The median is what makes this usable: a subtitle row contains a handful of
@@ -201,5 +206,17 @@ mod tests {
 
         assert_eq!(median_extent(&bands), 10);
         assert_eq!(median_extent(&[]), 0);
+    }
+
+    #[test]
+    fn reports_the_longest_band_extent() {
+        let bands = [
+            Band { start: 0, end: 2 },
+            Band { start: 10, end: 60 },
+            Band { start: 70, end: 80 },
+        ];
+
+        assert_eq!(max_extent(&bands), 50);
+        assert_eq!(max_extent(&[]), 0);
     }
 }
