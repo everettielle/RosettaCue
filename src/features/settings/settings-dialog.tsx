@@ -911,6 +911,66 @@ export function SettingsDialog({
                       </FieldDescription>
                     </Field>
                   )}
+                  <Field>
+                    <FieldLabel htmlFor={`max-tokens-${activeTask}`}>
+                      {m.settings_max_tokens()}
+                    </FieldLabel>
+                    <Input
+                      id={`max-tokens-${activeTask}`}
+                      type="number"
+                      inputMode="numeric"
+                      min={1}
+                      value={profile.max_tokens}
+                      onChange={(event) => {
+                        const value = Number.parseInt(event.target.value, 10)
+                        if (Number.isFinite(value) && value >= 1)
+                          updateProfile({ max_tokens: value })
+                      }}
+                    />
+                    <FieldDescription>
+                      {m.settings_max_tokens_description()}
+                    </FieldDescription>
+                  </Field>
+                  <Field>
+                    <FieldLabel htmlFor={`timeout-${activeTask}`}>
+                      {m.settings_timeout()}
+                    </FieldLabel>
+                    <Input
+                      id={`timeout-${activeTask}`}
+                      type="number"
+                      inputMode="numeric"
+                      min={1}
+                      value={profile.timeout_seconds}
+                      onChange={(event) => {
+                        const value = Number.parseInt(event.target.value, 10)
+                        if (Number.isFinite(value) && value >= 1)
+                          updateProfile({ timeout_seconds: value })
+                      }}
+                    />
+                    <FieldDescription>
+                      {m.settings_timeout_description()}
+                    </FieldDescription>
+                  </Field>
+                  <Field>
+                    <FieldLabel htmlFor={`max-attempts-${activeTask}`}>
+                      {m.settings_max_attempts()}
+                    </FieldLabel>
+                    <Input
+                      id={`max-attempts-${activeTask}`}
+                      type="number"
+                      inputMode="numeric"
+                      min={1}
+                      value={profile.max_attempts}
+                      onChange={(event) => {
+                        const value = Number.parseInt(event.target.value, 10)
+                        if (Number.isFinite(value) && value >= 1)
+                          updateProfile({ max_attempts: value })
+                      }}
+                    />
+                    <FieldDescription>
+                      {m.settings_max_attempts_description()}
+                    </FieldDescription>
+                  </Field>
                 </FieldGroup>
                 <div className="flex items-center gap-3">
                   <Button
