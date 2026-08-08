@@ -1,4 +1,5 @@
 import type {
+  LayoutTuning,
   LlmProvider,
   ProviderCommon,
   ProviderConfig,
@@ -16,6 +17,44 @@ export type ModelTask = "ocr" | "ruby" | "validation" | "translation"
 export type WorkspaceSettings = {
   separate_ruby_recognition: boolean
   profiles: Record<ModelTask, ProviderConfig>
+  layout: LayoutTuning
+}
+
+/**
+ * The supported range of each block-detection threshold, mirroring the bounds
+ * the analyzer clamps to. The dialog enforces them so a typed value is refused
+ * where it is entered rather than silently corrected two layers down.
+ */
+export const layoutBounds = {
+  separation_em: { minimum: 1.5, maximum: 8, step: 0.1 },
+  minimum_block_em2: { minimum: 0, maximum: 8, step: 0.1 },
+  maximum_blocks: { minimum: 1, maximum: 32, step: 1 },
+} as const satisfies Record<
+  keyof LayoutTuning,
+  { minimum: number; maximum: number; step: number }
+>
+
+export const defaultLayoutTuning: LayoutTuning = {
+  separation_em: 2,
+  minimum_block_em2: 0.5,
+  maximum_blocks: 8,
+}
+
+/** Stored values are resolved the same way the analyzer resolves them. */
+function mergeLayout(value: Partial<LayoutTuning> | undefined): LayoutTuning {
+  const resolve = (key: keyof LayoutTuning) => {
+    const stored = value?.[key]
+    if (typeof stored !== "number" || !Number.isFinite(stored)) {
+      return defaultLayoutTuning[key]
+    }
+    const { minimum, maximum } = layoutBounds[key]
+    return Math.min(Math.max(stored, minimum), maximum)
+  }
+  return {
+    separation_em: resolve("separation_em"),
+    minimum_block_em2: resolve("minimum_block_em2"),
+    maximum_blocks: Math.round(resolve("maximum_blocks")),
+  }
 }
 
 const COMMON_KEYS = [
@@ -45,6 +84,15 @@ function commonDefaults(provider: LlmProvider): ProviderCommon {
   }
 }
 
+const REASONING_EFFORTS: ReadonlySet<string> = new Set([
+  "none",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+] satisfies ReasoningEffort[])
+
 /** The only place that resolves stored provider-specific values. */
 function normalizeSpec(
   provider: LlmProvider,
@@ -54,7 +102,16 @@ function normalizeSpec(
     case "open_ai":
       return {
         provider,
-        provider_options: { reasoning_effort: storedEffort ?? "none" },
+        // A profile saved before "minimal" was retired for the gpt-5.6
+        // family, or before "xhigh"/"max" existed, stores a value this
+        // version no longer recognizes; that falls back the same way an
+        // absent value does rather than reaching the backend unresolved.
+        provider_options: {
+          reasoning_effort:
+            storedEffort && REASONING_EFFORTS.has(storedEffort)
+              ? storedEffort
+              : "none",
+        },
       }
     case "lm_studio":
     case "ollama":
@@ -69,6 +126,7 @@ export function providerDefaults(provider: LlmProvider): ProviderConfig {
 
 export const defaultWorkspaceSettings: WorkspaceSettings = {
   separate_ruby_recognition: false,
+  layout: defaultLayoutTuning,
   profiles: {
     ocr: providerDefaults("lm_studio"),
     ruby: providerDefaults("lm_studio"),
@@ -122,6 +180,7 @@ export function loadWorkspaceSettings(): WorkspaceSettings {
         separate_ruby_recognition:
           stored.separate_ruby_recognition ??
           defaultWorkspaceSettings.separate_ruby_recognition,
+        layout: mergeLayout(stored.layout),
         profiles: {
           ocr: mergeProfile(
             stored.profiles.ocr,

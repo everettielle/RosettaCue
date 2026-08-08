@@ -1,7 +1,9 @@
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
-use rosettacue_core::{Application, ExportFormat, ExportOptions, ExportScope, LlmProvider};
+use rosettacue_core::{
+    Application, ExportFormat, ExportOptions, ExportScope, LayoutTuning, LlmProvider,
+};
 
 mod model_config;
 
@@ -87,6 +89,8 @@ enum OcrCommand {
         project: PathBuf,
         #[arg(long, default_value = "jpn")]
         language: String,
+        #[command(flatten)]
+        tuning: LayoutTuningArgs,
         /// Write the full report here instead of printing it.
         #[arg(long)]
         json: Option<PathBuf>,
@@ -108,6 +112,34 @@ struct OcrRunArgs {
     cue_id: Vec<uuid::Uuid>,
     #[arg(long)]
     overwrite: bool,
+}
+
+/// The block-detection thresholds, for trying a value out over a whole track
+/// before committing it in the application's settings.
+#[derive(Debug, clap::Args)]
+struct LayoutTuningArgs {
+    /// Blank space of this many em separates two blocks.
+    #[arg(long)]
+    separation_em: Option<f32>,
+    /// Fragments smaller than this many em² are merged into their neighbour.
+    #[arg(long)]
+    minimum_block_em2: Option<f32>,
+    /// More blocks than this degrades the Cue to one whole-Cue block.
+    #[arg(long)]
+    maximum_blocks: Option<u32>,
+}
+
+impl From<LayoutTuningArgs> for LayoutTuning {
+    fn from(value: LayoutTuningArgs) -> Self {
+        let defaults = Self::default();
+        Self {
+            separation_em: value.separation_em.unwrap_or(defaults.separation_em),
+            minimum_block_em2: value
+                .minimum_block_em2
+                .unwrap_or(defaults.minimum_block_em2),
+            maximum_blocks: value.maximum_blocks.unwrap_or(defaults.maximum_blocks),
+        }
+    }
 }
 
 #[derive(Debug, clap::Args)]
@@ -323,9 +355,10 @@ fn run_ocr_command(app: Application, command: OcrCommand) -> anyhow::Result<()> 
         OcrCommand::LayoutSurvey {
             project,
             language,
+            tuning,
             json,
         } => {
-            let survey = app.survey_cue_layout(project, &language)?;
+            let survey = app.survey_cue_layout(project, &language, tuning.into())?;
             let report = serde_json::to_string_pretty(&survey)?;
             if let Some(path) = json {
                 std::fs::write(&path, report)?;

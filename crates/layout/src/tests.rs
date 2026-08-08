@@ -1,7 +1,8 @@
 use rosettacue_domain::{BlockSource, WritingMode};
 
 use super::{
-    BlockOrder, LayoutDoubt, LayoutOptions, Mask, ModeRule, Rect, analyze_mask, decode_mask,
+    BlockOrder, LayoutDoubt, LayoutOptions, LayoutTuning, Mask, ModeRule, Rect, analyze_mask,
+    decode_mask,
 };
 
 /// Paints glyph-shaped ink so the analyzer sees what a real crop shows it.
@@ -68,9 +69,85 @@ impl Canvas {
         self
     }
 
+    /// Paints one horizontal line of `glyphs`, each centred in its own em cell.
+    fn line(&mut self, x: u32, y: u32, em: u32, glyphs: &[Glyph]) -> &mut Self {
+        let inset = (em / 16).max(1);
+        let size = em.saturating_sub(inset * 2).max(1);
+        for (index, glyph) in glyphs.iter().enumerate() {
+            let cell = x + em * u32::try_from(index).expect("glyph index");
+            match glyph {
+                Glyph::Space => {}
+                Glyph::Split => {
+                    let half = (size - inset) / 2;
+                    for offset in [0, size - half] {
+                        self.fill(Rect {
+                            x: cell + inset + offset,
+                            y: y + inset,
+                            width: half,
+                            height: size,
+                        });
+                    }
+                }
+                Glyph::Dots => {
+                    let dot = (em / 6).max(1);
+                    for step in 0..3 {
+                        self.fill(Rect {
+                            x: cell + inset + step * (size - dot) / 2,
+                            y: y + inset + size - dot,
+                            width: dot,
+                            height: dot,
+                        });
+                    }
+                }
+                Glyph::Narrow => {
+                    let width = (em / 8).max(1);
+                    self.fill(Rect {
+                        x: cell + (em - width) / 2,
+                        y: y + inset,
+                        width,
+                        height: size,
+                    });
+                }
+                Glyph::Kana => {
+                    let stroke = (size / 3).max(1);
+                    for offset in [0, size - stroke] {
+                        self.fill(Rect {
+                            x: cell + inset + offset,
+                            y: y + inset,
+                            width: stroke,
+                            height: size,
+                        });
+                    }
+                }
+            }
+        }
+        self
+    }
+
     fn finish(&self) -> Mask {
         Mask::new(self.width, self.height, self.pixels.clone()).expect("mask")
     }
+}
+
+/// The ink shapes one line of Japanese dialogue puts on a mask.
+///
+/// What matters to block separation is where the blank is, and every one of
+/// these leaves it somewhere different. None of them projects a full em of
+/// continuous ink onto the flow axis, which is exactly the property that makes
+/// the flow axis useless for measuring an em: a real line is written in glyphs
+/// with gutters, not in filled boxes.
+#[derive(Clone, Copy)]
+enum Glyph {
+    /// A kanji of two radicals, such as 鈴: full height, split by a gutter.
+    Split,
+    /// An ellipsis: three dots on the baseline with blank between them.
+    Dots,
+    /// A bracket or an exclamation mark: narrow ink centred in the em box.
+    Narrow,
+    /// A kana: two strokes with a blank run between them.
+    Kana,
+    /// An ideographic space (U+3000).
+    Space,
 }
 
 fn japanese() -> LayoutOptions {
@@ -190,6 +267,93 @@ fn separates_the_measured_mixed_direction_cue() {
             "expected {actual} glyphs, estimated {estimated}"
         );
     }
+}
+
+/// The cue that exposed the em bootstrap: `（鈴）ぶはあっ！　はあっ…　はあっ…`,
+/// one horizontal line whose phrases are parted by ideographic spaces, with
+/// ruby over the kanji.
+///
+/// Reading the em off a band along the flow axis measured a stroke rather than
+/// a glyph, which put the separation threshold below the blank an ideographic
+/// space leaves and cut the line into a block per phrase. No glyph here has an
+/// unbroken em of ink along that axis, which is what a real line looks like.
+fn spaced_dialogue_line() -> Mask {
+    use Glyph::{Dots, Kana, Narrow, Space, Split};
+
+    let em = 52;
+    let mut canvas = Canvas::new(1000, 110);
+    canvas
+        // （鈴）ぶはあっ！　はあっ…　はあっ…
+        .line(
+            20,
+            40,
+            em,
+            &[
+                Narrow, Split, Narrow, Kana, Kana, Kana, Kana, Narrow, Space, Kana, Kana, Kana,
+                Dots, Space, Kana, Kana, Kana, Dots,
+            ],
+        )
+        // すず, set over the kanji at half size.
+        .scaled_run(20 + em, 10, em / 2, 2, WritingMode::HorizontalTb, 80);
+    canvas.finish()
+}
+
+#[test]
+fn keeps_ideographic_spaces_inside_one_block() {
+    let layout = analyze_mask(&spaced_dialogue_line(), &japanese());
+
+    assert_eq!(layout.blocks.len(), 1, "{:?}", layout.blocks);
+    let block = &layout.blocks[0];
+    assert_eq!(block.writing_mode, WritingMode::HorizontalTb);
+    assert_eq!(block.units, Some(1), "the ruby row is not a main row");
+    // The em must land near the true 52, not on the 15-pixel kana stroke that
+    // the median band extent used to report.
+    assert!(block.em >= 40, "em estimated at {}", block.em);
+}
+
+#[test]
+fn a_narrower_separation_cuts_the_line_at_its_spaces() {
+    let tuning = LayoutTuning {
+        separation_em: 1.5,
+        ..LayoutTuning::default()
+    };
+
+    let layout = analyze_mask(
+        &spaced_dialogue_line(),
+        &LayoutOptions::new(tuning, BlockOrder::RightToLeft),
+    );
+
+    // Proof the threshold is what holds the line together, and that the setting
+    // reaches the analyzer: at the narrowest supported separation the widest
+    // blank — the space after the exclamation mark — becomes a boundary.
+    assert!(layout.blocks.len() > 1, "{:?}", layout.blocks);
+}
+
+#[test]
+fn out_of_range_tuning_falls_back_to_something_usable() {
+    let clamped = LayoutTuning {
+        separation_em: 0.0,
+        minimum_block_em2: -1.0,
+        maximum_blocks: 0,
+    }
+    .clamped();
+
+    assert_eq!(
+        clamped,
+        LayoutTuning {
+            separation_em: *super::SEPARATION_EM_RANGE.start(),
+            minimum_block_em2: 0.0,
+            maximum_blocks: 1,
+        }
+    );
+
+    let not_a_number = LayoutTuning {
+        separation_em: f32::NAN,
+        ..LayoutTuning::default()
+    }
+    .clamped();
+
+    assert_eq!(not_a_number, LayoutTuning::default());
 }
 
 #[test]

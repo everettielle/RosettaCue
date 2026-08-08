@@ -8,7 +8,7 @@ use rosettacue_domain::{
     BlockSource, NormalizationRecord, OcrDocument, OcrLine, OcrSpan, RubyAnnotation, RubyPosition,
     TextBlock, TextStyle, ValidationIssue, ValidationSeverity, WritingMode,
 };
-use rosettacue_layout::{BlockLayout, CueLayout};
+use rosettacue_layout::{BlockLayout, CueLayout, LayoutTuning};
 use rosettacue_llm::{
     CompletionRequest, CompletionResponse, LlmModel, LlmProvider, ProviderClient, ProviderConfig,
     ProviderDiagnostic,
@@ -30,6 +30,10 @@ pub struct OcrPipelineConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ruby: Option<ProviderConfig>,
     pub validation: ProviderConfig,
+    /// Block-detection thresholds. Defaulted so that a job persisted before
+    /// they were configurable still resumes.
+    #[serde(default)]
+    pub layout: LayoutTuning,
 }
 
 impl OcrPipelineConfig {
@@ -39,6 +43,7 @@ impl OcrPipelineConfig {
             recognition: config.clone(),
             ruby: None,
             validation: config,
+            layout: LayoutTuning::default(),
         }
     }
 
@@ -48,6 +53,7 @@ impl OcrPipelineConfig {
             recognition: self.recognition.redacted(),
             ruby: self.ruby.as_ref().map(ProviderConfig::redacted),
             validation: self.validation.redacted(),
+            layout: self.layout,
         }
     }
 }
@@ -439,7 +445,7 @@ impl ProviderOcrBackend {
         let language = languages::resolve(&request.language)?;
         let started = Instant::now();
         let image = std::fs::read(&request.image_path)?;
-        let layout = analyze_layout(&image, language);
+        let layout = analyze_layout(&image, language, self.config.layout);
 
         let mut blocks = Vec::with_capacity(layout.blocks.len());
         let mut normalizations = Vec::new();
@@ -507,11 +513,8 @@ struct BlockOutcome {
 /// A PNG this pipeline cannot decode is not a reason to fail the cue: the
 /// provider may well read it. Treating an undecodable bitmap as one horizontal
 /// block sends exactly the request the pipeline sent before blocks existed.
-fn analyze_layout(image: &[u8], language: &LanguagePreset) -> CueLayout {
-    let options = rosettacue_layout::LayoutOptions {
-        block_order: language.block_order,
-        ..rosettacue_layout::LayoutOptions::default()
-    };
+fn analyze_layout(image: &[u8], language: &LanguagePreset, tuning: LayoutTuning) -> CueLayout {
+    let options = rosettacue_layout::LayoutOptions::new(tuning, language.block_order);
     rosettacue_layout::analyze_png(image, &options).unwrap_or_else(|_| CueLayout {
         image: rosettacue_layout::Rect {
             x: 0,
@@ -1148,6 +1151,7 @@ mod tests {
             recognition: provider.clone(),
             ruby: Some(provider.clone()),
             validation: provider,
+            layout: LayoutTuning::default(),
         };
 
         let redacted = config.redacted();

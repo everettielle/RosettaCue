@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import {
+  defaultLayoutTuning,
   defaultWorkspaceSettings,
   loadWorkspaceSettings,
   saveWorkspaceSettings,
@@ -87,6 +88,63 @@ describe("workspace model settings persistence", () => {
     const ocr = loadWorkspaceSettings().profiles.ocr
 
     expect(ocr.provider).toBe("open_ai")
+    expect(
+      ocr.provider === "open_ai" && ocr.provider_options.reasoning_effort
+    ).toBe("none")
+  })
+
+  it("restores block-detection thresholds and defaults the ones never stored", () => {
+    const settings = structuredClone(defaultWorkspaceSettings)
+    settings.layout.separation_em = 3.5
+
+    saveWorkspaceSettings(settings)
+
+    expect(loadWorkspaceSettings().layout).toEqual({
+      ...defaultLayoutTuning,
+      separation_em: 3.5,
+    })
+  })
+
+  it("pulls stored block-detection thresholds back into their supported range", () => {
+    localStorage.setItem(
+      "rosettacue.workspace-settings.v3",
+      JSON.stringify({
+        profiles: defaultWorkspaceSettings.profiles,
+        layout: {
+          separation_em: 0,
+          minimum_block_em2: "half an em",
+          maximum_blocks: 4000,
+        },
+      })
+    )
+
+    // A separation of zero would cut at every blank column between glyphs, so
+    // a stored value the analyzer would refuse is resolved here as well.
+    expect(loadWorkspaceSettings().layout).toEqual({
+      separation_em: 1.5,
+      minimum_block_em2: defaultLayoutTuning.minimum_block_em2,
+      maximum_blocks: 32,
+    })
+  })
+
+  it("falls back to none for a reasoning effort this version no longer accepts", () => {
+    localStorage.setItem(
+      "rosettacue.workspace-settings.v3",
+      JSON.stringify({
+        profiles: {
+          ...defaultWorkspaceSettings.profiles,
+          ocr: {
+            ...defaultWorkspaceSettings.profiles.ocr,
+            provider: "open_ai",
+            model: "gpt-5.6-luna",
+            provider_options: { reasoning_effort: "minimal" },
+          },
+        },
+      })
+    )
+
+    const ocr = loadWorkspaceSettings().profiles.ocr
+
     expect(
       ocr.provider === "open_ai" && ocr.provider_options.reasoning_effort
     ).toBe("none")

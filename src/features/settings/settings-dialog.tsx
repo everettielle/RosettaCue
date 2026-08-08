@@ -9,6 +9,8 @@ import {
   MoonIcon,
   PlusIcon,
   RefreshCwIcon,
+  RotateCcwIcon,
+  ScanTextIcon,
   SunIcon,
   Trash2Icon,
 } from "lucide-react"
@@ -47,6 +49,7 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
 import { useTheme } from "@/components/theme-provider"
 import type {
+  LayoutTuning,
   LlmModel,
   LlmProvider,
   MediaToolDiagnostic,
@@ -57,6 +60,8 @@ import type {
   ReasoningEffort,
 } from "@/features/projects/types"
 import {
+  defaultLayoutTuning,
+  layoutBounds,
   providerDefaults,
   type ModelTask,
   type WorkspaceSettings,
@@ -65,7 +70,7 @@ import { desktop } from "@/lib/desktop"
 import { cn } from "@/lib/utils"
 import * as m from "@/paraglide/messages.js"
 
-type Section = "general" | "project" | "models" | "advanced"
+type Section = "general" | "project" | "models" | "ocr" | "advanced"
 type Appearance = "system" | "light" | "dark"
 
 const sections: Array<{
@@ -76,7 +81,34 @@ const sections: Array<{
   { value: "general", label: m.settings_general(), icon: MonitorCogIcon },
   { value: "project", label: m.settings_project(), icon: FilmIcon },
   { value: "models", label: m.settings_models(), icon: ActivityIcon },
+  { value: "ocr", label: m.settings_ocr(), icon: ScanTextIcon },
   { value: "advanced", label: m.settings_advanced(), icon: BugIcon },
+]
+
+/**
+ * The block-detection thresholds, in the order they act on a Cue: the cut, then
+ * the fragment merge that cleans up after it, then the cap that gives up.
+ */
+const layoutFields: Array<{
+  key: keyof LayoutTuning
+  label: () => string
+  description: () => string
+}> = [
+  {
+    key: "separation_em",
+    label: m.settings_layout_separation,
+    description: m.settings_layout_separation_description,
+  },
+  {
+    key: "minimum_block_em2",
+    label: m.settings_layout_minimum_block,
+    description: m.settings_layout_minimum_block_description,
+  },
+  {
+    key: "maximum_blocks",
+    label: m.settings_layout_maximum_blocks,
+    description: m.settings_layout_maximum_blocks_description,
+  },
 ]
 
 const providers: Array<{ value: LlmProvider; label: string }> = [
@@ -88,10 +120,11 @@ const providers: Array<{ value: LlmProvider; label: string }> = [
 
 const reasoningEfforts: Array<{ value: ReasoningEffort; label: string }> = [
   { value: "none", label: "none" },
-  { value: "minimal", label: "minimal" },
   { value: "low", label: "low" },
   { value: "medium", label: "medium" },
   { value: "high", label: "high" },
+  { value: "xhigh", label: "xhigh" },
+  { value: "max", label: "max" },
 ]
 
 const tasks: Array<{ value: ModelTask; label: string }> = [
@@ -193,6 +226,12 @@ export function SettingsDialog({
     structuredClone(projectSettings)
   )
   const [section, setSection] = React.useState<Section>("general")
+  // Kept as typed text rather than as a number so that clearing a field, or
+  // typing "1." on the way to "1.5", does not snap under the caret. A value is
+  // committed to the draft only once it parses inside its bounds.
+  const [layoutText, setLayoutText] = React.useState<
+    Partial<Record<keyof LayoutTuning, string>>
+  >({})
   const [activeTask, setActiveTask] = React.useState<ModelTask>("ocr")
   const [models, setModels] = React.useState<
     Partial<Record<ModelTask, LlmModel[]>>
@@ -212,6 +251,7 @@ export function SettingsDialog({
       setDraft(structuredClone(settings))
       setProjectDraft(structuredClone(projectSettings))
       setAppearance(theme)
+      setLayoutText({})
       setDiagnostic(null)
       setError(null)
     }
@@ -257,6 +297,7 @@ export function SettingsDialog({
       setDraft(structuredClone(settings))
       setProjectDraft(structuredClone(projectSettings))
       setAppearance(theme)
+      setLayoutText({})
       setDiagnostic(null)
       setError(null)
     }
@@ -319,6 +360,26 @@ export function SettingsDialog({
       max_attempts: profile.max_attempts,
     })
     setModels((current) => ({ ...current, [activeTask]: [] }))
+  }
+
+  const changeLayout = (key: keyof LayoutTuning, text: string) => {
+    setLayoutText((current) => ({ ...current, [key]: text }))
+    const value = Number(text)
+    const { minimum, maximum } = layoutBounds[key]
+    if (!text.trim() || !Number.isFinite(value)) return
+    if (value < minimum || value > maximum) return
+    setDraft((current) => ({
+      ...current,
+      layout: {
+        ...current.layout,
+        [key]: key === "maximum_blocks" ? Math.round(value) : value,
+      },
+    }))
+  }
+
+  const resetLayout = () => {
+    setDraft((current) => ({ ...current, layout: { ...defaultLayoutTuning } }))
+    setLayoutText({})
   }
 
   const changeRubySeparation = (separate_ruby_recognition: boolean) => {
@@ -869,6 +930,64 @@ export function SettingsDialog({
                       })}
                     </p>
                   )}
+                </div>
+              </div>
+            )}
+
+            {section === "ocr" && (
+              <div className="flex flex-col gap-6">
+                <div>
+                  <h3 className="font-medium">
+                    {m.settings_block_detection()}
+                  </h3>
+                  <p className="text-sm text-muted-foreground">
+                    {m.settings_block_detection_description()}
+                  </p>
+                </div>
+                <FieldGroup>
+                  {layoutFields.map((field) => {
+                    const bounds = layoutBounds[field.key]
+                    return (
+                      <Field key={field.key}>
+                        <FieldLabel htmlFor={`layout-${field.key}`}>
+                          {field.label()}
+                        </FieldLabel>
+                        <Input
+                          id={`layout-${field.key}`}
+                          type="number"
+                          inputMode="decimal"
+                          min={bounds.minimum}
+                          max={bounds.maximum}
+                          step={bounds.step}
+                          value={
+                            layoutText[field.key] ??
+                            String(draft.layout[field.key])
+                          }
+                          onChange={(event) =>
+                            changeLayout(field.key, event.target.value)
+                          }
+                        />
+                        <FieldDescription>
+                          {field.description()}{" "}
+                          {m.settings_layout_range({
+                            minimum: bounds.minimum,
+                            maximum: bounds.maximum,
+                            default: defaultLayoutTuning[field.key],
+                          })}
+                        </FieldDescription>
+                      </Field>
+                    )
+                  })}
+                </FieldGroup>
+                <Separator />
+                <div className="flex items-center gap-3">
+                  <p className="min-w-0 flex-1 text-sm text-muted-foreground">
+                    {m.settings_block_detection_reset_description()}
+                  </p>
+                  <Button type="button" variant="outline" onClick={resetLayout}>
+                    <RotateCcwIcon data-icon="inline-start" />
+                    {m.settings_block_detection_reset()}
+                  </Button>
                 </div>
               </div>
             )}

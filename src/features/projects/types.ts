@@ -229,7 +229,14 @@ export type PgsExtractionResult = {
 
 export type LlmProvider = "lm_studio" | "ollama" | "open_ai" | "anthropic"
 
-export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high"
+/**
+ * Mirrors `rosettacue_llm::ReasoningEffort`: the values the `gpt-5.6` family
+ * (Sol, Terra, Luna) accepts for `reasoning_effort`. "minimal", valid on
+ * `gpt-5`/`gpt-5.1`, is rejected by `gpt-5.6` models; "xhigh" and "max" did
+ * not exist before it.
+ */
+export type ReasoningEffort =
+  "none" | "low" | "medium" | "high" | "xhigh" | "max"
 
 /**
  * Provider selection plus the parameters only that provider accepts, mirroring
@@ -263,10 +270,22 @@ export type ProviderCommon = {
 
 export type ProviderConfig = ProviderCommon & ProviderSpec
 
+/**
+ * The block-detection thresholds, in units of the em the analyzer measures
+ * from each Cue bitmap, so one setting holds across resolutions and font sizes.
+ * Mirrors `rosettacue_layout::LayoutTuning`; the backend clamps every value.
+ */
+export type LayoutTuning = {
+  separation_em: number
+  minimum_block_em2: number
+  maximum_blocks: number
+}
+
 export type OcrPipelineConfig = {
   recognition: ProviderConfig
   ruby: ProviderConfig | null
   validation: ProviderConfig
+  layout: LayoutTuning
 }
 
 export type LlmModel = { id: string }
