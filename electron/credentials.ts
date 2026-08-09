@@ -43,9 +43,7 @@ export class CredentialStore {
     const current = this.loadRaw()
     for (const [slot, value] of Object.entries(entries)) {
       if (value && value.trim()) {
-        current[slot] = safeStorage
-          .encryptString(value)
-          .toString("base64")
+        current[slot] = safeStorage.encryptString(value).toString("base64")
       } else {
         delete current[slot]
       }

@@ -319,6 +319,8 @@
   "workspace_export": "Export",
   "workspace_import_source": "Import Source",
   "workspace_inspector": "Inspector",
+  "workspace_inspector_collapse": "Collapse inspector",
+  "workspace_inspector_expand": "Expand inspector",
   "workspace_mark_reviewed": "Mark as Reviewed",
   "workspace_next_cue": "Next cue",
   "workspace_no_cue_description": "Choose a cue to edit content, timing, position, and style.",

@@ -1,6 +1,6 @@
 import * as React from "react"
 import type { LucideIcon } from "lucide-react"
-import { usePanelRef } from "react-resizable-panels"
+import { usePanelRef, type PanelSize } from "react-resizable-panels"
 import {
   CheckCircle2Icon,
   ChevronLeftIcon,
@@ -11,6 +11,8 @@ import {
   HistoryIcon,
   LanguagesIcon,
   ListChecksIcon,
+  PanelBottomCloseIcon,
+  PanelBottomOpenIcon,
   PauseIcon,
   PlayIcon,
   Redo2Icon,
@@ -32,7 +34,12 @@ import {
   EmptyMedia,
   EmptyTitle,
 } from "@/components/ui/empty"
-import { Field, FieldGroup, FieldLabel } from "@/components/ui/field"
+import {
+  Field,
+  FieldGroup,
+  FieldLabel,
+  FieldTitle,
+} from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
 import {
   ResizableHandle,
@@ -44,6 +51,7 @@ import { Separator } from "@/components/ui/separator"
 import { Spinner } from "@/components/ui/spinner"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { toast } from "@/components/ui/toast"
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
 import {
   Tooltip,
   TooltipContent,
@@ -126,6 +134,8 @@ type RibbonCommand = {
 }
 
 const INSPECTOR_MIN_HEIGHT = 220
+/** Height of the inspector header bar, which is all that stays visible when collapsed. */
+const INSPECTOR_COLLAPSED_HEIGHT = 44
 const WORKSPACE_ERROR_TOAST_ID = "workspace-error"
 
 const ribbonTabs: Array<{
@@ -449,6 +459,7 @@ export function ProjectWorkspace({
   const [inspectorContentHeight, setInspectorContentHeight] = React.useState<
     number | null
   >(null)
+  const [inspectorCollapsed, setInspectorCollapsed] = React.useState(false)
   const inspectorPanelRef = usePanelRef()
   const hasLoadedDocumentRef = React.useRef(false)
   const inspectorMaxHeight =
@@ -465,14 +476,27 @@ export function ProjectWorkspace({
     []
   )
 
+  // The panel collapses by drag as well as by its header button, so the flag
+  // follows the measured size rather than only the button.
+  const handleInspectorResize = React.useCallback((size: PanelSize) => {
+    setInspectorCollapsed(size.inPixels <= INSPECTOR_COLLAPSED_HEIGHT)
+  }, [])
+
+  const toggleInspectorCollapsed = React.useCallback(() => {
+    const panel = inspectorPanelRef.current
+    if (!panel) return
+    if (panel.isCollapsed()) panel.expand()
+    else panel.collapse()
+  }, [inspectorPanelRef])
+
   React.useLayoutEffect(() => {
-    if (inspectorMaxHeight === undefined) return
+    if (inspectorMaxHeight === undefined || inspectorCollapsed) return
 
     const panel = inspectorPanelRef.current
     if (panel && panel.getSize().inPixels > inspectorMaxHeight) {
       panel.resize(inspectorMaxHeight)
     }
-  }, [inspectorMaxHeight, inspectorPanelRef])
+  }, [inspectorCollapsed, inspectorMaxHeight, inspectorPanelRef])
 
   React.useEffect(() => {
     if (!error) {
@@ -554,7 +578,12 @@ export function ProjectWorkspace({
       if (!active || Object.keys(keys).length === 0) return
       setSettings((current) => {
         const profiles = { ...current.profiles }
-        for (const task of ["ocr", "ruby", "validation", "translation"] as const) {
+        for (const task of [
+          "ocr",
+          "ruby",
+          "validation",
+          "translation",
+        ] as const) {
           if (keys[task]) {
             profiles[task] = { ...profiles[task], api_key: keys[task] }
           }
@@ -1441,8 +1470,11 @@ export function ProjectWorkspace({
                 defaultSize="45%"
                 minSize={INSPECTOR_MIN_HEIGHT}
                 maxSize={inspectorMaxHeight}
+                collapsible
+                collapsedSize={INSPECTOR_COLLAPSED_HEIGHT}
                 groupResizeBehavior="preserve-pixel-size"
                 panelRef={inspectorPanelRef}
+                onResize={handleInspectorResize}
                 className="min-h-0 overflow-hidden"
               >
                 <Inspector
@@ -1451,6 +1483,8 @@ export function ProjectWorkspace({
                   draft={cueDraft}
                   changed={draftChanged}
                   saving={saving}
+                  collapsed={inspectorCollapsed}
+                  onToggleCollapsed={toggleInspectorCollapsed}
                   onDraftChange={updateCueDraft}
                   onBlockChange={updateCueBlock}
                   onBlockMove={moveCueBlock}
@@ -1871,6 +1905,8 @@ function Inspector({
   draft,
   changed,
   saving,
+  collapsed,
+  onToggleCollapsed,
   onDraftChange,
   onBlockChange,
   onBlockMove,
@@ -1895,6 +1931,8 @@ function Inspector({
   draft: CueEditDraft | null
   changed: boolean
   saving: boolean
+  collapsed: boolean
+  onToggleCollapsed: () => void
   onDraftChange: (patch: Partial<CueEditDraft>) => void
   onBlockChange: (index: number, patch: Partial<TextBlock>) => void
   onBlockMove: (index: number, offset: number) => void
@@ -1929,11 +1967,16 @@ function Inspector({
       ? Math.min(selectedBlock.index, Math.max(0, blocks.length - 1))
       : 0
   const activeBlock = blocks[clampedBlockIndex]
+  const placementDisabled = !document || saving || !activeBlock
   const selectBlock = (index: number) => {
     if (cue) setSelectedBlock({ cueId: cue.id, index })
   }
 
   React.useLayoutEffect(() => {
+    // Collapsing unmounts the body, so stop measuring and keep the last
+    // reported height — that is what the panel expands back to.
+    if (collapsed) return
+
     const header = headerRef.current
     const content = contentRef.current
     if (!header || !content) return
@@ -1952,7 +1995,7 @@ function Inspector({
     reportHeight()
 
     return () => observer.disconnect()
-  }, [onContentHeightChange])
+  }, [collapsed, onContentHeightChange])
 
   return (
     <aside className="flex h-full min-h-0 flex-col bg-background">
@@ -1960,6 +2003,15 @@ function Inspector({
         ref={headerRef}
         className="flex min-h-11 shrink-0 flex-wrap items-center gap-2 border-b px-3 py-1.5"
       >
+        <IconButton
+          label={
+            collapsed
+              ? m.workspace_inspector_expand()
+              : m.workspace_inspector_collapse()
+          }
+          icon={collapsed ? PanelBottomOpenIcon : PanelBottomCloseIcon}
+          onClick={onToggleCollapsed}
+        />
         <h2 className="text-sm font-medium">{m.workspace_inspector()}</h2>
         {cue && (
           <>
@@ -1971,7 +2023,12 @@ function Inspector({
             <Badge variant="outline">
               {reviewStatusLabel(cue.review_status)}
             </Badge>
-            <div className="ml-auto flex flex-wrap items-center gap-2">
+            <div
+              className={cn(
+                "ml-auto flex flex-wrap items-center gap-2",
+                collapsed && "hidden"
+              )}
+            >
               <Button
                 size="sm"
                 variant="outline"
@@ -2033,203 +2090,217 @@ function Inspector({
           </>
         )}
       </div>
-      <ScrollArea className="min-h-0 flex-1">
-        <div ref={contentRef}>
-          {cue ? (
-            <div className="grid gap-4 p-3 lg:grid-cols-[minmax(0,3fr)_minmax(18rem,2fr)]">
-              <section className="min-w-0">
-                <FieldGroup>
-                  <Field>
-                    <div className="flex items-center gap-2">
-                      <FieldLabel htmlFor="cue-content">
-                        {m.workspace_content()}
-                      </FieldLabel>
-                      <Badge
-                        variant={changed ? "secondary" : "ghost"}
-                        className="ml-auto"
-                      >
-                        {changed ? m.workspace_unsaved() : m.workspace_saved()}
-                      </Badge>
-                      <IconButton
-                        label={m.revision_history_title()}
-                        icon={HistoryIcon}
-                        size="icon-xs"
-                        onClick={onOpenHistory}
-                      />
-                      <Badge
-                        variant="secondary"
-                        aria-label={m.revision_history_count({
-                          count: revisionCount,
-                        })}
-                      >
-                        {revisionCount}
-                      </Badge>
-                    </div>
-                    {blocks.length > 1 && (
-                      <div className="flex flex-wrap items-center gap-1.5">
-                        <div
-                          className="flex flex-wrap gap-1.5"
-                          role="tablist"
-                          aria-label={m.workspace_blocks()}
+      {!collapsed && (
+        <ScrollArea className="min-h-0 flex-1">
+          <div ref={contentRef}>
+            {cue ? (
+              <div className="grid gap-4 p-3 lg:grid-cols-[minmax(0,3fr)_minmax(18rem,2fr)]">
+                <section className="min-w-0">
+                  <FieldGroup>
+                    <Field>
+                      <div className="flex items-center gap-2">
+                        <FieldLabel htmlFor="cue-content">
+                          {m.workspace_content()}
+                        </FieldLabel>
+                        <Badge
+                          variant={changed ? "secondary" : "ghost"}
+                          className="ml-auto"
                         >
-                          {blocks.map((block, index) => (
-                            <Button
-                              key={index}
-                              type="button"
-                              size="sm"
-                              role="tab"
-                              aria-selected={index === clampedBlockIndex}
-                              variant={
-                                index === clampedBlockIndex
-                                  ? "secondary"
-                                  : "ghost"
-                              }
-                              onClick={() => selectBlock(index)}
-                            >
-                              {m.workspace_block({ index: index + 1 })}
-                              <span className="text-muted-foreground">
-                                {writingModeLabel(block.writing_mode)}
-                              </span>
-                            </Button>
-                          ))}
-                        </div>
-                        {/* Reading order is guessed from geometry, so a wrong
-                            guess has to be fixable. */}
-                        <div className="ml-auto flex items-center gap-1">
-                          <IconButton
-                            label={m.workspace_block_move_earlier()}
-                            icon={ChevronLeftIcon}
-                            size="icon-xs"
-                            disabled={saving || clampedBlockIndex === 0}
-                            onClick={() => {
-                              onBlockMove(clampedBlockIndex, -1)
-                              selectBlock(clampedBlockIndex - 1)
-                            }}
-                          />
-                          <IconButton
-                            label={m.workspace_block_move_later()}
-                            icon={ChevronRightIcon}
-                            size="icon-xs"
-                            disabled={
-                              saving || clampedBlockIndex === blocks.length - 1
-                            }
-                            onClick={() => {
-                              onBlockMove(clampedBlockIndex, 1)
-                              selectBlock(clampedBlockIndex + 1)
-                            }}
-                          />
-                        </div>
+                          {changed
+                            ? m.workspace_unsaved()
+                            : m.workspace_saved()}
+                        </Badge>
+                        <IconButton
+                          label={m.revision_history_title()}
+                          icon={HistoryIcon}
+                          size="icon-xs"
+                          onClick={onOpenHistory}
+                        />
+                        <Badge
+                          variant="secondary"
+                          aria-label={m.revision_history_count({
+                            count: revisionCount,
+                          })}
+                        >
+                          {revisionCount}
+                        </Badge>
                       </div>
-                    )}
-                    <SubtitleContentEditor
-                      key={`${cue.id}-${clampedBlockIndex}`}
-                      lines={activeBlock?.lines ?? []}
-                      disabled={!document || saving}
-                      onChange={(lines) =>
-                        onBlockChange(clampedBlockIndex, { lines })
-                      }
-                    />
-                    <Button onClick={onSave} disabled={!changed || saving}>
-                      {saving ? (
-                        <Spinner data-icon="inline-start" />
-                      ) : (
-                        <SaveIcon data-icon="inline-start" />
+                      {blocks.length > 1 && (
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <div
+                            className="flex flex-wrap gap-1.5"
+                            role="tablist"
+                            aria-label={m.workspace_blocks()}
+                          >
+                            {blocks.map((block, index) => (
+                              <Button
+                                key={index}
+                                type="button"
+                                size="sm"
+                                role="tab"
+                                aria-selected={index === clampedBlockIndex}
+                                variant={
+                                  index === clampedBlockIndex
+                                    ? "secondary"
+                                    : "ghost"
+                                }
+                                onClick={() => selectBlock(index)}
+                              >
+                                {m.workspace_block({ index: index + 1 })}
+                                <span className="text-muted-foreground">
+                                  {writingModeLabel(block.writing_mode)}
+                                </span>
+                              </Button>
+                            ))}
+                          </div>
+                          {/* Reading order is guessed from geometry, so a wrong
+                            guess has to be fixable. */}
+                          <div className="ml-auto flex items-center gap-1">
+                            <IconButton
+                              label={m.workspace_block_move_earlier()}
+                              icon={ChevronLeftIcon}
+                              size="icon-xs"
+                              disabled={saving || clampedBlockIndex === 0}
+                              onClick={() => {
+                                onBlockMove(clampedBlockIndex, -1)
+                                selectBlock(clampedBlockIndex - 1)
+                              }}
+                            />
+                            <IconButton
+                              label={m.workspace_block_move_later()}
+                              icon={ChevronRightIcon}
+                              size="icon-xs"
+                              disabled={
+                                saving ||
+                                clampedBlockIndex === blocks.length - 1
+                              }
+                              onClick={() => {
+                                onBlockMove(clampedBlockIndex, 1)
+                                selectBlock(clampedBlockIndex + 1)
+                              }}
+                            />
+                          </div>
+                        </div>
                       )}
-                      {m.workspace_save_cue()}
-                    </Button>
-                  </Field>
-                </FieldGroup>
-              </section>
-
-              <section className="flex min-w-0 flex-col gap-3 border-t pt-3 lg:border-t-0 lg:border-l lg:pt-0 lg:pl-4">
-                <div className="flex items-center gap-2">
-                  <p className="text-sm font-medium">
-                    {m.workspace_timing_placement()}
-                  </p>
-                </div>
-                <div className="grid grid-cols-2 gap-2">
-                  <Field>
-                    <FieldLabel htmlFor="cue-start">
-                      {m.workspace_start()}
-                    </FieldLabel>
-                    <Input
-                      id="cue-start"
-                      value={draft?.start ?? formatTimestamp(cue.start_ms)}
-                      disabled={!document || saving}
-                      onChange={(event) =>
-                        onDraftChange({ start: event.target.value })
-                      }
-                    />
-                  </Field>
-                  <Field>
-                    <FieldLabel htmlFor="cue-end">
-                      {m.workspace_end()}
-                    </FieldLabel>
-                    <Input
-                      id="cue-end"
-                      value={draft?.end ?? formatTimestamp(cue.end_ms)}
-                      disabled={!document || saving}
-                      onChange={(event) =>
-                        onDraftChange({ end: event.target.value })
-                      }
-                    />
-                  </Field>
-                </div>
-                <Field>
-                  <FieldLabel>{m.workspace_position()}</FieldLabel>
-                  <PositionGrid
-                    value={activeBlock?.position ?? cue.position}
-                    disabled={!document || saving || !activeBlock}
-                    onValueChange={(position) =>
-                      onBlockChange(clampedBlockIndex, { position })
-                    }
-                  />
-                </Field>
-                <Field>
-                  <FieldLabel>{m.workspace_writing_mode()}</FieldLabel>
-                  <div
-                    className="flex gap-1.5"
-                    role="radiogroup"
-                    aria-label={m.workspace_writing_mode()}
-                  >
-                    {writingModes.map((mode) => (
-                      <Button
-                        key={mode}
-                        type="button"
-                        size="sm"
-                        role="radio"
-                        aria-checked={activeBlock?.writing_mode === mode}
-                        variant={
-                          activeBlock?.writing_mode === mode
-                            ? "secondary"
-                            : "outline"
+                      <SubtitleContentEditor
+                        key={`${cue.id}-${clampedBlockIndex}`}
+                        lines={activeBlock?.lines ?? []}
+                        disabled={!document || saving}
+                        onChange={(lines) =>
+                          onBlockChange(clampedBlockIndex, { lines })
                         }
-                        disabled={!document || saving || !activeBlock}
-                        onClick={() =>
-                          onBlockChange(clampedBlockIndex, {
-                            writing_mode: mode,
-                          })
-                        }
-                      >
-                        {writingModeLabel(mode)}
+                      />
+                      <Button onClick={onSave} disabled={!changed || saving}>
+                        {saving ? (
+                          <Spinner data-icon="inline-start" />
+                        ) : (
+                          <SaveIcon data-icon="inline-start" />
+                        )}
+                        {m.workspace_save_cue()}
                       </Button>
-                    ))}
+                    </Field>
+                  </FieldGroup>
+                </section>
+
+                <section className="flex min-w-0 flex-col gap-3 border-t pt-3 lg:border-t-0 lg:border-l lg:pt-0 lg:pl-4">
+                  <div className="flex items-center gap-2">
+                    <p className="text-sm font-medium">
+                      {m.workspace_timing_placement()}
+                    </p>
                   </div>
-                </Field>
-              </section>
-            </div>
-          ) : (
-            <Empty className="border-0 p-6">
-              <EmptyHeader>
-                <EmptyTitle>{m.workspace_no_cue_selected()}</EmptyTitle>
-                <EmptyDescription>
-                  {m.workspace_no_cue_description()}
-                </EmptyDescription>
-              </EmptyHeader>
-            </Empty>
-          )}
-        </div>
-      </ScrollArea>
+                  <div className="grid grid-cols-2 gap-2">
+                    <Field>
+                      <FieldLabel htmlFor="cue-start">
+                        {m.workspace_start()}
+                      </FieldLabel>
+                      <Input
+                        id="cue-start"
+                        value={draft?.start ?? formatTimestamp(cue.start_ms)}
+                        disabled={!document || saving}
+                        onChange={(event) =>
+                          onDraftChange({ start: event.target.value })
+                        }
+                      />
+                    </Field>
+                    <Field>
+                      <FieldLabel htmlFor="cue-end">
+                        {m.workspace_end()}
+                      </FieldLabel>
+                      <Input
+                        id="cue-end"
+                        value={draft?.end ?? formatTimestamp(cue.end_ms)}
+                        disabled={!document || saving}
+                        onChange={(event) =>
+                          onDraftChange({ end: event.target.value })
+                        }
+                      />
+                    </Field>
+                  </div>
+                  {/* Placement and direction describe the same block, so they
+                    stay side by side and wrap together when space runs out. */}
+                  <div className="flex flex-wrap items-start gap-4">
+                    <Field
+                      className="w-auto"
+                      data-disabled={placementDisabled || undefined}
+                    >
+                      <FieldTitle>{m.workspace_position()}</FieldTitle>
+                      <PositionGrid
+                        value={activeBlock?.position ?? cue.position}
+                        disabled={placementDisabled}
+                        onValueChange={(position) =>
+                          onBlockChange(clampedBlockIndex, { position })
+                        }
+                      />
+                    </Field>
+                    <Field
+                      className="w-auto"
+                      data-disabled={placementDisabled || undefined}
+                    >
+                      <FieldTitle id="cue-writing-mode-label">
+                        {m.workspace_writing_mode()}
+                      </FieldTitle>
+                      <ToggleGroup
+                        aria-labelledby="cue-writing-mode-label"
+                        variant="outline"
+                        size="sm"
+                        disabled={placementDisabled}
+                        value={activeBlock ? [activeBlock.writing_mode] : []}
+                        onValueChange={(value) => {
+                          // A block always has a direction, so the click that
+                          // would clear the current one is ignored.
+                          const mode = writingModes.find(
+                            (candidate) => candidate === value[0]
+                          )
+                          if (mode) {
+                            onBlockChange(clampedBlockIndex, {
+                              writing_mode: mode,
+                            })
+                          }
+                        }}
+                      >
+                        {writingModes.map((mode) => (
+                          <ToggleGroupItem key={mode} value={mode}>
+                            {writingModeLabel(mode)}
+                          </ToggleGroupItem>
+                        ))}
+                      </ToggleGroup>
+                    </Field>
+                  </div>
+                </section>
+              </div>
+            ) : (
+              <Empty className="border-0 p-6">
+                <EmptyHeader>
+                  <EmptyTitle>{m.workspace_no_cue_selected()}</EmptyTitle>
+                  <EmptyDescription>
+                    {m.workspace_no_cue_description()}
+                  </EmptyDescription>
+                </EmptyHeader>
+              </Empty>
+            )}
+          </div>
+        </ScrollArea>
+      )}
     </aside>
   )
 }
