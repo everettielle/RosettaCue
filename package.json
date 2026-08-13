@@ -41,7 +41,7 @@
     "@inlang/paraglide-js": "^2.23.1",
     "@inlang/plugin-m-function-matcher": "2.2.6",
     "@inlang/plugin-message-format": "4.4.0",
-    "@types/node": "^24",
+    "@types/node": "^26",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "@vitejs/plugin-react": "^6",
